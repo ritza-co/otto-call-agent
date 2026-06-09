@@ -65,10 +65,23 @@ app's **microphone to `BlackHole 2ch`**, and use **headphones**.
 > **Headphones matter:** if Otto plays out of speakers, your mic re-captures it and
 > the call gets an echo. Headphones avoid that.
 
+## Two modes
+
+| Command | Brain | Notes |
+|---|---|---|
+| `npm run converse` | **Deepgram Voice Agent API** | One socket: **Flux** STT + adaptive echo cancellation + model-level turn-taking/barge-in + **Aura** TTS + an OpenAI "think" brain with a `web_search` function. Deepgram handles STT, self-echo, and interruption. **Most Deepgram-native — the speaker-friendly path.** |
+| `npm run dev` | **Custom pipeline** | Our own dual STT + wake-word + LLM + Aura, with mic-ducking / RMS barge-in. More control; needs headphones for clean speaker use. |
+
+Both share the same audio routing, transcript persistence, notes archive, and UI.
+
+In Voice Agent mode, "Otto only answers when addressed" is enforced via the think
+prompt — tune it (and the greeting, which calibrates the echo canceller) to taste.
+
 ## Run
 
 ```bash
-npm run dev        # start the agent (Ctrl-C to stop; transcript saved to notes/)
+npm run converse   # Voice Agent mode (recommended) — Ctrl-C to stop
+npm run dev        # custom-pipeline mode
 npm run devices    # list audio device names (for .env)
 ```
 

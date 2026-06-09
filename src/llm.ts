@@ -153,6 +153,28 @@ class AnthropicProvider implements LLMProvider {
   }
 }
 
+/**
+ * Standalone web search via OpenAI's Responses API web_search tool. Used as the
+ * handler for the Voice Agent's `web_search` function call. Returns clean,
+ * speakable text (no URLs/citations).
+ */
+let openaiClient: any = null;
+export async function searchWeb(query: string): Promise<string> {
+  if (!openaiClient) {
+    const pkg = "openai";
+    const { default: OpenAI } = await import(pkg);
+    openaiClient = new OpenAI();
+  }
+  const res = await openaiClient.responses.create({
+    model: process.env.LLM_MODEL || "gpt-4o-mini",
+    instructions: "Answer in one short, spoken sentence. No URLs, citations, or markdown.",
+    input: query,
+    max_output_tokens: 300,
+    tools: [{ type: "web_search" }],
+  });
+  return cleanForSpeech(res.output_text ?? "");
+}
+
 export function createLLM(): LLMProvider {
   const provider = (process.env.LLM_PROVIDER || "openai").toLowerCase();
   if (provider === "anthropic") return new AnthropicProvider();

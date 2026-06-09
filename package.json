@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "converse": "tsx src/converse.ts",
     "setup": "tsx src/setup.ts",
     "ui:demo": "tsx src/ui.ts --demo",
     "devices": "tsx src/devices.ts",
