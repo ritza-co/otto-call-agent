@@ -47,6 +47,15 @@ func uid(byName target: String) -> String? {
     return nil
 }
 
+func deviceID(byUID target: String) -> AudioDeviceID? {
+    for id in allDeviceIDs() {
+        if stringProp(id, kAudioDevicePropertyDeviceUID) == target { return id }
+    }
+    return nil
+}
+
+let aggUID = "com.otto.callagent.monitor"
+
 let args = CommandLine.arguments
 guard args.count >= 4 else {
     err("usage: create-multi-output <AggregateName> <Sub1> <Sub2> ...")
@@ -64,9 +73,16 @@ for n in subNames {
     subUIDs.append(u)
 }
 
+// If we built this device before (e.g. for a different output), destroy it so
+// we can rebuild it around the current output device.
+if let existing = deviceID(byUID: aggUID) {
+    let s = AudioHardwareDestroyAggregateDevice(existing)
+    if s != noErr { err("warning: could not remove existing \(aggName): \(s)") }
+}
+
 let description: [String: Any] = [
     kAudioAggregateDeviceNameKey as String: aggName,
-    kAudioAggregateDeviceUIDKey as String: "com.otto.callagent.monitor",
+    kAudioAggregateDeviceUIDKey as String: aggUID,
     kAudioAggregateDeviceSubDeviceListKey as String: subUIDs.map { [kAudioSubDeviceUIDKey as String: $0] },
     kAudioAggregateDeviceMasterSubDeviceKey as String: subUIDs[0],
     kAudioAggregateDeviceIsStackedKey as String: 1, // 1 = multi-output (stacked)

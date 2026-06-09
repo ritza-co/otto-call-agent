@@ -82,10 +82,10 @@ async function main() {
   const ROUTE_DEVICE = "Otto Monitor";
   const currentOut = (await route.currentOutput()) ?? "MacBook Air Speakers";
   const outs = await route.listOutputs();
-  if (outs.includes(ROUTE_DEVICE)) {
-    ok(`"${ROUTE_DEVICE}" already exists`);
-  } else if (await has("swiftc") && has16) {
-    console.log(`  creating "${ROUTE_DEVICE}" = [${currentOut} + BlackHole 16ch]…`);
+  if ((await has("swiftc")) && has16) {
+    // The helper destroys any prior "Otto Monitor" and rebuilds it around the
+    // CURRENT output device — so re-running setup after changing headphones works.
+    console.log(`  building "${ROUTE_DEVICE}" = [${currentOut} + BlackHole 16ch]…`);
     const swift = resolve(process.cwd(), "scripts/create-multi-output.swift");
     const bin = "/tmp/otto-mkdev";
     const c = await run("swiftc", [swift, "-o", bin, "-framework", "CoreAudio"]);
@@ -94,8 +94,10 @@ async function main() {
       manualMonitorSteps(currentOut);
     } else {
       const r = await run(bin, [ROUTE_DEVICE, currentOut, "BlackHole 16ch"]);
-      r.code === 0 ? ok(`created "${ROUTE_DEVICE}"`) : (warn(`create failed: ${r.err}`), manualMonitorSteps(currentOut));
+      r.code === 0 ? ok(`built "${ROUTE_DEVICE}" around ${currentOut}`) : (warn(`build failed: ${r.err}`), manualMonitorSteps(currentOut));
     }
+  } else if (outs.includes(ROUTE_DEVICE)) {
+    ok(`"${ROUTE_DEVICE}" exists (install Xcode CLT to auto-rebuild it for a new output)`);
   } else {
     warn(await has("swiftc") ? "BlackHole 16ch needed first" : "Xcode command-line tools (swiftc) not found");
     manualMonitorSteps(currentOut);
