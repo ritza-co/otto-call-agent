@@ -69,20 +69,29 @@ app's **microphone to `BlackHole 2ch`**, and use **headphones**.
 
 | Command | Brain | Notes |
 |---|---|---|
-| `npm run converse` | **Deepgram Voice Agent API** | One socket: **Flux** STT + adaptive echo cancellation + model-level turn-taking/barge-in + **Aura** TTS + an OpenAI "think" brain with a `web_search` function. Deepgram handles STT, self-echo, and interruption. **Most Deepgram-native — the speaker-friendly path.** |
-| `npm run dev` | **Custom pipeline** | Our own dual STT + wake-word + LLM + Aura, with mic-ducking / RMS barge-in. More control; needs headphones for clean speaker use. |
+| `npm run dev` | **Custom pipeline** (the product) | Dual Deepgram STT (diarized call + your mic) → wake-word gate → context-aware LLM (web search + notes) → Aura TTS, injected into the call. Otto stays silent until called by name. **Recommended.** |
+| `npm run converse` | **Deepgram Voice Agent API** (experimental) | One socket: Flux STT + Aura + an OpenAI "think" brain. Impressive, but built for *active* 1:1 conversation — see "Why not the Voice Agent API?" below. |
 
-Both share the same audio routing, transcript persistence, notes archive, and UI.
+Both share the audio routing, transcript persistence, notes archive, and UI.
 
-In Voice Agent mode, "Otto only answers when addressed" is enforced via the think
-prompt — tune it (and the greeting, which calibrates the echo canceller) to taste.
+### Why not the Voice Agent API?
+
+The Voice Agent API is excellent for phone-style agents that converse turn-by-turn
+with one caller. This product is the opposite: a **passive, wake-word-gated copilot
+in a multi-person room** that should stay quiet until someone says "Otto." The Voice
+Agent responds on *every* detected turn by design, so "only speak when addressed"
+can't be enforced reliably from a prompt — and its adaptive echo cancellation
+expects a browser-clean mic, which a native capture pipeline doesn't provide. The
+custom pipeline fits the wake-word use case directly (it only acts on "Otto …" and
+gates with a NORESPONSE check), so it's the product; `converse` stays in the repo as
+a documented experiment.
 
 ## Run
 
 ```bash
-npm run converse   # Voice Agent mode (recommended) — Ctrl-C to stop
-npm run dev        # custom-pipeline mode
+npm run dev        # the agent (Ctrl-C to stop; transcript saved to notes/)
 npm run devices    # list audio device names (for .env)
+npm run converse   # experimental Voice Agent mode
 ```
 
 Then join your call (mic = `BlackHole 2ch`). Anyone can say **"Otto, …"**.
