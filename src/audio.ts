@@ -20,6 +20,11 @@ export interface PcmFormat {
   channels: number;
 }
 
+/** Treat ""/"default" as the system default output (sox -d) — needed for Bluetooth. */
+export function isDefaultDevice(name: string): boolean {
+  return !name || name.trim() === "" || name.trim().toLowerCase() === "default";
+}
+
 /** Normalized (0..1) RMS level of an s16le buffer — used for barge-in detection. */
 export function rms16(buf: Buffer): number {
   const n = Math.floor(buf.length / 2);
@@ -94,11 +99,11 @@ export async function playPCM(deviceName: string, pcm: Buffer, format: PcmFormat
   await writeFile(tmp, pcm);
   try {
     await new Promise<void>((resolve) => {
-      const sox = spawn("sox", [
-        "-t", "raw", "-r", String(format.sampleRate), "-e", "signed", "-b", "16", "-c", String(format.channels),
-        tmp,
-        "-t", "coreaudio", deviceName,
-      ]);
+      const inArgs = ["-t", "raw", "-r", String(format.sampleRate), "-e", "signed", "-b", "16", "-c", String(format.channels), tmp];
+      // "default"/empty → sox default device (-d), which works with Bluetooth;
+      // naming a Bluetooth CoreAudio device directly fails in sox.
+      const outArgs = isDefaultDevice(deviceName) ? ["-d"] : ["-t", "coreaudio", deviceName];
+      const sox = spawn("sox", [...inArgs, ...outArgs]);
       sox.on("close", () => resolve());
       sox.on("error", () => resolve());
     });
@@ -148,10 +153,9 @@ export class PcmSink {
   private proc: ChildProcess;
 
   constructor(deviceName: string, format: PcmFormat) {
-    this.proc = spawn("sox", [
-      "-t", "raw", "-r", String(format.sampleRate), "-e", "signed", "-b", "16", "-c", String(format.channels), "-",
-      "-t", "coreaudio", deviceName,
-    ]);
+    const inArgs = ["-t", "raw", "-r", String(format.sampleRate), "-e", "signed", "-b", "16", "-c", String(format.channels), "-"];
+    const outArgs = isDefaultDevice(deviceName) ? ["-d"] : ["-t", "coreaudio", deviceName];
+    this.proc = spawn("sox", [...inArgs, ...outArgs]);
     this.proc.on("error", () => {});
     // Continuously fed in real time by the mic; ignore EPIPE if sox ever exits.
     this.proc.stdin?.on("error", () => {});

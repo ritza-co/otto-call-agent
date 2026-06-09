@@ -80,7 +80,9 @@ async function answer(question: string): Promise<void> {
       transcript: transcript.asText(),
       question,
       participants: [...transcript.participants],
-      notesArchive: transcript.loadArchive(),
+      // Cap past-meeting notes in the prompt — smaller input = faster LLM. Recent
+      // notes are usually enough; raise if you need deeper cross-meeting recall.
+      notesArchive: transcript.loadArchive(6000),
     });
     if (!result.respond || !result.text) {
       console.log(`${AGENT_NAME} … (stayed silent — not addressed)`);
