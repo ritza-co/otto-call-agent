@@ -1,28 +1,35 @@
 /**
- * Otto — Call Agent. Phase 1: listen to the call + your mic, keep a saved
- * transcript, answer wake-word questions out loud on YOUR speakers.
- * (Phase 2 adds injecting the reply into the call mic so everyone hears it.)
+ * Otto — Call Agent.
+ *
+ * Listens to a call (incoming audio + your mic), keeps a saved transcript, and
+ * when anyone says "Otto, …" answers out loud — both on your speakers AND injected
+ * into the call's microphone (BlackHole 16ch) so everyone on the call hears it.
  */
 import { resolve } from "node:path";
 import dotenv from "dotenv";
 dotenv.config();
 
-import { capture } from "./audio.js";
-import { playPCM } from "./audio.js";
+import { capture, playPCM, stereoToMono } from "./audio.js";
+import { CallMixer } from "./mixer.js";
 import { openSTT } from "./deepgram.js";
 import { WakeWord } from "./wakeword.js";
 import { createLLM } from "./llm.js";
-import { synthesize, TTS_SAMPLE_RATE, TTS_CHANNELS } from "./tts.js";
+import { synthesize, TTS_SAMPLE_RATE } from "./tts.js";
 import { TranscriptStore } from "./transcript.js";
+import * as route from "./route.js";
 
 const AGENT_NAME = process.env.AGENT_NAME || "Otto";
 const HOST_NAME = process.env.HOST_NAME || "You";
 const MIC_DEVICE = process.env.MIC_DEVICE || "MacBook Air Microphone";
-const CALL_CAPTURE_DEVICE = process.env.CALL_CAPTURE_DEVICE || "BlackHole 2ch";
+const CALL_CAPTURE_DEVICE = process.env.CALL_CAPTURE_DEVICE || "BlackHole 16ch"; // call's incoming audio
+const CALL_MIC_DEVICE = process.env.CALL_MIC_DEVICE || "BlackHole 2ch"; // inject Otto here (stereo); call app's mic
 const MONITOR_DEVICE = process.env.MONITOR_DEVICE || "MacBook Air Speakers";
+const ROUTE_DEVICE = process.env.ROUTE_DEVICE || "Otto Monitor"; // multi-output created by setup
 const NOTES_DIR = resolve(process.env.NOTES_DIR || "./notes");
 const STITCH_WINDOW_MS = 12_000;
-const STT = { sampleRate: 16000, channels: 1 };
+
+const CALL_FMT = { sampleRate: 16000, channels: 1 }; // call capture → STT
+const MIC_FMT = { sampleRate: 48000, channels: 2 }; // mic capture → mixer (+ downmixed to STT)
 
 if (!process.env.DEEPGRAM_API_KEY) {
   console.error("Missing DEEPGRAM_API_KEY. Copy .env.example to .env and fill it in.");
@@ -37,6 +44,7 @@ function isAcknowledgement(text: string): boolean {
 const transcript = new TranscriptStore(NOTES_DIR, new Date().toISOString());
 const wake = new WakeWord(AGENT_NAME);
 const llm = createLLM();
+const mixer = new CallMixer(CALL_MIC_DEVICE, MIC_FMT);
 
 let answering = false;
 let awaitingQuestion = false;
@@ -47,7 +55,6 @@ async function answer(question: string): Promise<void> {
   if (answering) return;
   answering = true;
   try {
-    process.stdout.write(`\n${AGENT_NAME} ⟳ thinking…\r`);
     const result = await llm.answer({
       agentName: AGENT_NAME,
       transcript: transcript.asText(),
@@ -64,8 +71,9 @@ async function answer(question: string): Promise<void> {
     transcript.add(AGENT_NAME, result.text);
 
     try {
-      const pcm = await synthesize(result.text);
-      await playPCM(MONITOR_DEVICE, pcm, { sampleRate: TTS_SAMPLE_RATE, channels: TTS_CHANNELS });
+      const pcm = await synthesize(result.text); // mono 48k
+      mixer.speak(pcm); // → everyone on the call hears Otto
+      await playPCM(MONITOR_DEVICE, pcm, { sampleRate: TTS_SAMPLE_RATE, channels: 1 }); // → you hear Otto
     } catch (err) {
       console.error("TTS/playback failed:", err);
     }
@@ -77,7 +85,7 @@ async function answer(question: string): Promise<void> {
 }
 
 function handleUtterance(speaker: string, text: string): void {
-  if (answering) return; // ignore audio while Otto is speaking (echo)
+  if (answering) return; // ignore audio while Otto is speaking (avoids self-trigger)
 
   transcript.add(speaker, text);
   console.log(`${speaker}: ${text}`);
@@ -119,31 +127,58 @@ function handleUtterance(speaker: string, text: string): void {
 }
 
 async function main() {
-  // Two STT streams: the call (diarized — many remote speakers) and your mic.
+  // Route system output through the monitor device so we capture the call while
+  // you still hear it. Restored on exit.
+  let prevOutput: string | null = null;
+  if (await route.available()) {
+    const outs = await route.listOutputs();
+    if (outs.includes(ROUTE_DEVICE)) {
+      prevOutput = await route.currentOutput();
+      await route.setOutput(ROUTE_DEVICE);
+      console.log(`🔀 system output → "${ROUTE_DEVICE}" (was "${prevOutput}")`);
+    } else {
+      console.log(`⚠️  Monitor device "${ROUTE_DEVICE}" not found — run \`npm run setup\`. Call audio capture may be silent until then.`);
+    }
+  }
+
   const callStt = openSTT(
-    { diarize: true, keyterm: [AGENT_NAME], ...STT },
+    { diarize: true, keyterm: [AGENT_NAME], ...CALL_FMT },
     { onUtterance: ({ speaker, text }) => handleUtterance(`Speaker ${speaker + 1}`, text), onError: (e) => console.error("call STT:", e) },
   );
   const micStt = openSTT(
-    { diarize: false, keyterm: [AGENT_NAME], ...STT },
+    { diarize: false, keyterm: [AGENT_NAME], sampleRate: MIC_FMT.sampleRate, channels: 1 },
     { onUtterance: ({ text }) => handleUtterance(HOST_NAME, text), onError: (e) => console.error("mic STT:", e) },
   );
 
-  const callCap = await capture(CALL_CAPTURE_DEVICE, STT, (c) => callStt.send(c), (e) => console.error("call capture:", e));
-  const micCap = await capture(MIC_DEVICE, STT, (c) => micStt.send(c), (e) => console.error("mic capture:", e));
+  const callCap = await capture(CALL_CAPTURE_DEVICE, CALL_FMT, (c) => callStt.send(c), (e) => console.error("call capture:", e));
+  const micCap = await capture(
+    MIC_DEVICE,
+    MIC_FMT,
+    (stereo) => {
+      mixer.pushMic(stereo); // passthrough your voice into the call + mix Otto
+      micStt.send(stereoToMono(stereo)); // transcribe you
+    },
+    (e) => console.error("mic capture:", e),
+  );
 
-  console.log(`\n🎙️  Otto Call Agent — listening`);
+  console.log(`\n🎙️  Otto Call Agent — live`);
   console.log(`   wake word : "${AGENT_NAME}"`);
-  console.log(`   call audio: ${CALL_CAPTURE_DEVICE}   |   your mic: ${MIC_DEVICE}`);
-  console.log(`   replies on: ${MONITOR_DEVICE}   |   LLM: ${process.env.LLM_PROVIDER || "openai"}/${process.env.LLM_MODEL || "gpt-4o-mini"}`);
+  console.log(`   call audio: ${CALL_CAPTURE_DEVICE}   your mic: ${MIC_DEVICE}`);
+  console.log(`   call mic  : ${CALL_MIC_DEVICE}  ← set your call app's microphone to this`);
+  console.log(`   you hear  : ${MONITOR_DEVICE}   LLM: ${process.env.LLM_PROVIDER || "openai"}/${process.env.LLM_MODEL || "gpt-4o-mini"}`);
   console.log(`   transcript: ${transcript.savedAt}\n`);
-  console.log(`Say "${AGENT_NAME}, …" to ask a question. Ctrl-C to stop.\n`);
+  console.log(`Anyone on the call can say "${AGENT_NAME}, …" to ask a question. Ctrl-C to stop.\n`);
 
-  const shutdown = () => {
+  let stopped = false;
+  const shutdown = async () => {
+    if (stopped) return;
+    stopped = true;
     callCap.stop();
     micCap.stop();
     callStt.close();
     micStt.close();
+    mixer.stop();
+    if (prevOutput) await route.setOutput(prevOutput);
     console.log(`\nSaved transcript → ${transcript.savedAt}`);
     process.exit(0);
   };

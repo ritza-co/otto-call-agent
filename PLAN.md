@@ -29,7 +29,7 @@ We use the two BlackHole devices as one-way "cables". **Our app is the mixer.**
  ──────────────     │  CAPTURE                                                   │
  incoming audio ──▶ system output = Multi-Output("Otto Monitor")                 │
                     │      ├─▶ your real headphones  (you hear the call, 0 lag)   │
-                    │      └─▶ BlackHole 2ch ──▶ ffmpeg capture ─┐                │
+                    │      └─▶ BlackHole 16ch ──▶ ffmpeg capture ┐                │
  your mic ─────────▶ MacBook mic ──▶ ffmpeg capture ────────────┼─▶ Deepgram STT │
                     │                                            │   (2 streams)  │
                     │                                            ▼                │
@@ -40,8 +40,8 @@ We use the two BlackHole devices as one-way "cables". **Our app is the mixer.**
                     │                                            ▼                │
                     │                                       Aura TTS (PCM)        │
                     │   INJECT                                   │                │
- Zoom mic =         │   mixer: [your mic] + [TTS] ──▶ BlackHole 16ch ◀────────────┘
- BlackHole 16ch ◀───┘   (everyone on the call hears you + Otto)                   │
+ Zoom mic =         │   mixer: [your mic] + [TTS] ──▶ BlackHole 2ch ◀─────────────┘
+ BlackHole 2ch  ◀───┘   (everyone on the call hears you + Otto)                   │
                     │   …and TTS also ──▶ your headphones (monitor)               │
                     └────────────────────────────────────────────────────────────┘
 ```
@@ -49,20 +49,20 @@ We use the two BlackHole devices as one-way "cables". **Our app is the mixer.**
 **Device roles** (already present on this machine):
 | Device | Role |
 |---|---|
-| `BlackHole 16ch` | **Call mic** cable. Set Zoom's microphone to this. App writes `your mic + Otto TTS` here. |
-| `BlackHole 2ch` | **Call capture** cable. App reads the call's incoming audio here. |
+| `BlackHole 2ch` | **Call mic** cable (stereo). Set the call app's microphone to this. App writes `your mic + Otto TTS` here. |
+| `BlackHole 16ch` | **Call capture** cable. App reads the call's incoming audio here (downmixed). |
 | `MacBook … Microphone` | Your real mic. App reads it (transcript + passthrough into the call mic). |
-| `Otto Monitor` (Multi-Output: Headphones + BlackHole 2ch) | System output during a call, so you hear the call *and* we capture it. |
+| `Otto Monitor` (Multi-Output: Headphones + BlackHole 16ch) | System output during a call, so you hear the call *and* we capture it. |
 
 **The one setup step we automate/guide:** creating the `Otto Monitor` Multi-Output
-device and pointing Zoom's mic at `BlackHole 16ch`. The app can switch the system
+device and pointing Zoom's mic at `BlackHole 2ch`. The app can switch the system
 output to `Otto Monitor` at session start and restore it after (via SwitchAudioSource).
 
 ## Why our app must be the mixer
 
 BlackHole is just a pipe — whatever you *play* to it appears as its *input*. To get
 **both** your live mic and Otto's voice into the call, the app continuously forwards
-your mic into `BlackHole 16ch` and mixes in TTS when Otto speaks. (Loopback/Audio
+your mic into `BlackHole 2ch` and mixes in TTS when Otto speaks. (Loopback/Audio
 Hijack would do this without code, but we're staying free.)
 
 ## Build phases

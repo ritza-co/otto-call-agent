@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "setup": "tsx src/setup.ts",
     "devices": "tsx src/devices.ts",
     "typecheck": "tsc --noEmit"
   },
