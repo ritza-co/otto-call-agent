@@ -17,15 +17,22 @@ function clip(s: number): number {
 
 export class CallMixer {
   private readonly sink: PcmSink;
+  private readonly duck: boolean;
   private tts: Buffer = Buffer.alloc(0); // queued mono TTS, consumed in lockstep with mic
   speaking = false;
 
-  /** format is the cable format: stereo, same rate as the mic capture. */
-  constructor(deviceName: string, format: PcmFormat) {
+  /**
+   * @param duck  When true (recommended on speakers), your mic is muted for the
+   *   samples where Otto is speaking — so the speaker-echo of Otto can't loop
+   *   back into the call. When false (headphones), your voice is summed with
+   *   Otto's so you can talk over it.
+   */
+  constructor(deviceName: string, format: PcmFormat, duck = true) {
     this.sink = new PcmSink(deviceName, format);
+    this.duck = duck;
   }
 
-  /** Feed one interleaved s16le STEREO mic frame. Otto's TTS (mono) is summed in. */
+  /** Feed one interleaved s16le STEREO mic frame. Otto's TTS (mono) is mixed in. */
   pushMic(stereo: Buffer): void {
     let out = stereo;
     if (this.tts.length >= 2) {
@@ -37,8 +44,12 @@ export class CallMixer {
         const t = this.tts.readInt16LE(consumed);
         const li = f * 4;
         const ri = f * 4 + 2;
-        out.writeInt16LE(clip(out.readInt16LE(li) + t), li);
-        out.writeInt16LE(clip(out.readInt16LE(ri) + t), ri);
+        // Duck: replace your mic with Otto for these samples (no echo of Otto
+        // back into the call). Otherwise sum both.
+        const baseL = this.duck ? 0 : out.readInt16LE(li);
+        const baseR = this.duck ? 0 : out.readInt16LE(ri);
+        out.writeInt16LE(clip(baseL + t), li);
+        out.writeInt16LE(clip(baseR + t), ri);
         consumed += 2;
       }
       this.tts = this.tts.subarray(consumed);

@@ -46,7 +46,10 @@ function isAcknowledgement(text: string): boolean {
 const transcript = new TranscriptStore(NOTES_DIR, new Date().toISOString());
 const wake = new WakeWord(AGENT_NAME);
 const llm = createLLM();
-const mixer = new CallMixer(CALL_MIC_DEVICE, MIC_FMT);
+// Duck your mic while Otto speaks (default true) so Otto's speaker-echo can't
+// loop back into the call. Set DUCK_WHILE_SPEAKING=false on headphones.
+const DUCK = (process.env.DUCK_WHILE_SPEAKING ?? "true").toLowerCase() !== "false";
+const mixer = new CallMixer(CALL_MIC_DEVICE, MIC_FMT, DUCK);
 const ui = startUI(UI_PORT, { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE });
 
 let answering = false;
