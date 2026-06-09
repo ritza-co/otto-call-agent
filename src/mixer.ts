@@ -67,6 +67,12 @@ export class CallMixer {
     this.speaking = true;
   }
 
+  /** Stop Otto immediately (barge-in): drop any queued TTS, resume mic-only. */
+  cancel(): void {
+    this.tts = Buffer.alloc(0);
+    this.speaking = false;
+  }
+
   stop(): void {
     this.sink.stop();
   }

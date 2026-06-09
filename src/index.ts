@@ -9,7 +9,7 @@ import { resolve } from "node:path";
 import dotenv from "dotenv";
 dotenv.config();
 
-import { capture, playPCM, stereoToMono } from "./audio.js";
+import { capture, playPCMControllable, rms16, stereoToMono, type Playback } from "./audio.js";
 import { CallMixer } from "./mixer.js";
 import { openSTT } from "./deepgram.js";
 import { WakeWord } from "./wakeword.js";
@@ -50,6 +50,19 @@ const llm = createLLM();
 // loop back into the call. Set DUCK_WHILE_SPEAKING=false on headphones.
 const DUCK = (process.env.DUCK_WHILE_SPEAKING ?? "true").toLowerCase() !== "false";
 const mixer = new CallMixer(CALL_MIC_DEVICE, MIC_FMT, DUCK);
+
+// Barge-in: while Otto speaks, if you start talking, cut him off. Only safe when
+// your mic doesn't also hear Otto — i.e. on headphones (DUCK off). On speakers
+// Otto's echo would self-interrupt, so it's disabled there.
+const BARGE_IN = !DUCK;
+const BARGE_RMS = Number(process.env.BARGE_RMS || 0.05); // mic level that counts as "talking"
+let currentPlayback: Playback | null = null;
+let loudFrames = 0;
+
+function interrupt(): void {
+  mixer.cancel(); // stop injecting Otto into the call
+  currentPlayback?.stop(); // stop Otto on your monitor
+}
 const ui = startUI(UI_PORT, { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE });
 
 let answering = false;
@@ -82,7 +95,9 @@ async function answer(question: string): Promise<void> {
       const pcm = await synthesize(result.text); // mono 48k
       ui.emit({ type: "state", state: "speaking" });
       mixer.speak(pcm); // → everyone on the call hears Otto
-      await playPCM(MONITOR_DEVICE, pcm, { sampleRate: TTS_SAMPLE_RATE, channels: 1 }); // → you hear Otto
+      currentPlayback = playPCMControllable(MONITOR_DEVICE, pcm, { sampleRate: TTS_SAMPLE_RATE, channels: 1 }); // → you hear Otto
+      await currentPlayback.done; // resolves on completion OR barge-in stop()
+      currentPlayback = null;
     } catch (err) {
       console.error("TTS/playback failed:", err);
     }
@@ -168,6 +183,21 @@ async function main() {
     (stereo) => {
       mixer.pushMic(stereo); // passthrough your voice into the call + mix Otto
       micStt.send(stereoToMono(stereo)); // transcribe you
+
+      // Barge-in: sustained mic level while Otto is speaking → stop him.
+      if (BARGE_IN && mixer.speaking) {
+        if (rms16(stereo) > BARGE_RMS) {
+          if (++loudFrames >= 3) {
+            console.log(`${AGENT_NAME} ⏹  (interrupted)`);
+            interrupt();
+            loudFrames = 0;
+          }
+        } else {
+          loudFrames = 0;
+        }
+      } else {
+        loudFrames = 0;
+      }
     },
     (e) => console.error("mic capture:", e),
   );

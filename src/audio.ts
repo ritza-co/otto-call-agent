@@ -20,6 +20,18 @@ export interface PcmFormat {
   channels: number;
 }
 
+/** Normalized (0..1) RMS level of an s16le buffer — used for barge-in detection. */
+export function rms16(buf: Buffer): number {
+  const n = Math.floor(buf.length / 2);
+  if (!n) return 0;
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const s = buf.readInt16LE(i * 2) / 32768;
+    sum += s * s;
+  }
+  return Math.sqrt(sum / n);
+}
+
 /** Downmix interleaved s16le stereo to mono (average L/R). */
 export function stereoToMono(stereo: Buffer): Buffer {
   const frames = Math.floor(stereo.length / 4);
@@ -93,6 +105,39 @@ export async function playPCM(deviceName: string, pcm: Buffer, format: PcmFormat
   } finally {
     await unlink(tmp).catch(() => {});
   }
+}
+
+export interface Playback {
+  done: Promise<void>;
+  stop(): void;
+}
+
+/** Like playPCM, but cancellable — so barge-in can cut Otto off mid-reply. */
+export function playPCMControllable(deviceName: string, pcm: Buffer, format: PcmFormat): Playback {
+  let child: ChildProcess | null = null;
+  let killed = false;
+  const tmp = join(tmpdir(), `otto-tts-${process.pid}-${Date.now()}.raw`);
+  const done = (async () => {
+    await writeFile(tmp, pcm);
+    if (!killed) {
+      await new Promise<void>((resolve) => {
+        child = spawn("sox", [
+          "-t", "raw", "-r", String(format.sampleRate), "-e", "signed", "-b", "16", "-c", String(format.channels),
+          tmp, "-t", "coreaudio", deviceName,
+        ]);
+        child.on("close", () => resolve());
+        child.on("error", () => resolve());
+      });
+    }
+    await unlink(tmp).catch(() => {});
+  })();
+  return {
+    done,
+    stop() {
+      killed = true;
+      child?.kill("SIGKILL");
+    },
+  };
 }
 
 /**
