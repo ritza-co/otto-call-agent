@@ -16,6 +16,7 @@ import { WakeWord } from "./wakeword.js";
 import { createLLM } from "./llm.js";
 import { synthesize, TTS_SAMPLE_RATE } from "./tts.js";
 import { TranscriptStore } from "./transcript.js";
+import { startUI } from "./ui.js";
 import * as route from "./route.js";
 
 const AGENT_NAME = process.env.AGENT_NAME || "Otto";
@@ -26,6 +27,7 @@ const CALL_MIC_DEVICE = process.env.CALL_MIC_DEVICE || "BlackHole 2ch"; // injec
 const MONITOR_DEVICE = process.env.MONITOR_DEVICE || "MacBook Air Speakers";
 const ROUTE_DEVICE = process.env.ROUTE_DEVICE || "Otto Monitor"; // multi-output created by setup
 const NOTES_DIR = resolve(process.env.NOTES_DIR || "./notes");
+const UI_PORT = Number(process.env.UI_PORT || 4848);
 const STITCH_WINDOW_MS = 12_000;
 
 const CALL_FMT = { sampleRate: 16000, channels: 1 }; // call capture → STT
@@ -45,6 +47,7 @@ const transcript = new TranscriptStore(NOTES_DIR, new Date().toISOString());
 const wake = new WakeWord(AGENT_NAME);
 const llm = createLLM();
 const mixer = new CallMixer(CALL_MIC_DEVICE, MIC_FMT);
+const ui = startUI(UI_PORT, { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE });
 
 let answering = false;
 let awaitingQuestion = false;
@@ -54,6 +57,7 @@ let lastLine: { text: string; at: number } | null = null;
 async function answer(question: string): Promise<void> {
   if (answering) return;
   answering = true;
+  ui.emit({ type: "state", state: "thinking" });
   try {
     const result = await llm.answer({
       agentName: AGENT_NAME,
@@ -69,9 +73,11 @@ async function answer(question: string): Promise<void> {
     const tag = result.searched ? ` 🌐 ${result.sources[0] ?? "web"}` : "";
     console.log(`\n${AGENT_NAME} ▶ ${result.text}${tag}\n`);
     transcript.add(AGENT_NAME, result.text);
+    ui.emit({ type: "line", kind: "agent", speaker: AGENT_NAME, text: result.text, searched: result.searched, sources: result.sources });
 
     try {
       const pcm = await synthesize(result.text); // mono 48k
+      ui.emit({ type: "state", state: "speaking" });
       mixer.speak(pcm); // → everyone on the call hears Otto
       await playPCM(MONITOR_DEVICE, pcm, { sampleRate: TTS_SAMPLE_RATE, channels: 1 }); // → you hear Otto
     } catch (err) {
@@ -81,6 +87,7 @@ async function answer(question: string): Promise<void> {
     console.error("LLM failed:", err);
   } finally {
     answering = false;
+    ui.emit({ type: "state", state: "listening" });
   }
 }
 
@@ -89,6 +96,7 @@ function handleUtterance(speaker: string, text: string): void {
 
   transcript.add(speaker, text);
   console.log(`${speaker}: ${text}`);
+  ui.emit({ type: "line", kind: "speech", speaker, text });
 
   const now = Date.now();
   const directQuestion = wake.extract(text);
@@ -166,6 +174,7 @@ async function main() {
   console.log(`   call audio: ${CALL_CAPTURE_DEVICE}   your mic: ${MIC_DEVICE}`);
   console.log(`   call mic  : ${CALL_MIC_DEVICE}  ← set your call app's microphone to this`);
   console.log(`   you hear  : ${MONITOR_DEVICE}   LLM: ${process.env.LLM_PROVIDER || "openai"}/${process.env.LLM_MODEL || "gpt-4o-mini"}`);
+  console.log(`   UI        : ${ui.url}`);
   console.log(`   transcript: ${transcript.savedAt}\n`);
   console.log(`Anyone on the call can say "${AGENT_NAME}, …" to ask a question. Ctrl-C to stop.\n`);
 
