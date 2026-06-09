@@ -175,6 +175,35 @@ export async function searchWeb(query: string): Promise<string> {
   return cleanForSpeech(res.output_text ?? "");
 }
 
+/**
+ * Summarize a meeting transcript into clean, factual Markdown sections. Used by
+ * the dashboard's "Summarize meeting" action. Returns markdown text.
+ */
+export async function summarizeMeeting(transcript: string): Promise<string> {
+  if (!transcript || transcript.trim().length < 40) {
+    return "_Not enough was said in this meeting to summarize._";
+  }
+  if (!openaiClient) {
+    const pkg = "openai";
+    const { default: OpenAI } = await import(pkg);
+    openaiClient = new OpenAI();
+  }
+  const res = await openaiClient.responses.create({
+    model: process.env.LLM_MODEL || "gpt-4o-mini",
+    instructions: [
+      "You summarize meeting transcripts. Output clean GitHub-flavored Markdown with EXACTLY these sections, in order:",
+      "## Summary — 2–3 sentences.",
+      "## Key points — short bullets.",
+      "## Decisions — bullets, or 'None.' if there were none.",
+      "## Action items — bullets as 'Owner — task' when an owner is clear, else just the task; or 'None.'",
+      "Be concise and strictly factual — do not invent anything not in the transcript.",
+    ].join("\n"),
+    input: transcript,
+    max_output_tokens: 700,
+  });
+  return (res.output_text ?? "").trim() || "_Could not generate a summary._";
+}
+
 export function createLLM(): LLMProvider {
   const provider = (process.env.LLM_PROVIDER || "openai").toLowerCase();
   if (provider === "anthropic") return new AnthropicProvider();

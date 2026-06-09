@@ -9,7 +9,7 @@
  *   GET  /download?id=FILE  one transcript as a downloadable .md
  */
 import { createServer, type ServerResponse } from "node:http";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 export type AgentState = "listening" | "thinking" | "speaking";
@@ -25,6 +25,8 @@ export interface UIHandlers {
   notesDir?: string;
   onStart?: () => void;
   onEnd?: () => void;
+  /** Produce a Markdown summary for a transcript (LLM lives in the agent). */
+  onSummarize?: (transcript: string) => Promise<string>;
 }
 
 export interface UI {
@@ -33,6 +35,7 @@ export interface UI {
 }
 
 const SESSION_FILE = /-meeting\.md$/;
+const summaryFileFor = (id: string) => id.replace(/-meeting\.md$/, "-summary.md");
 
 function listSessions(notesDir: string) {
   if (!notesDir || !existsSync(notesDir)) return [];
@@ -41,9 +44,11 @@ function listSessions(notesDir: string) {
     .map((f) => {
       const full = join(notesDir, f);
       let title = f;
+      let lines = 0;
       try {
-        const first = readFileSync(full, "utf8").split("\n", 1)[0] || "";
-        title = first.replace(/^#\s*/, "").trim() || f;
+        const text = readFileSync(full, "utf8");
+        title = (text.split("\n", 1)[0] || "").replace(/^#\s*/, "").trim() || f;
+        lines = (text.match(/^\*\*/gm) || []).length; // counts attributed utterances
       } catch {
         /* keep filename */
       }
@@ -55,7 +60,7 @@ function listSessions(notesDir: string) {
       } catch {
         /* 0 */
       }
-      return { id: f, title, date, kb };
+      return { id: f, title, date, kb, lines, hasSummary: existsSync(join(notesDir, summaryFileFor(f))) };
     })
     .sort((a, b) => (a.id < b.id ? 1 : -1)); // newest first
 }
@@ -65,6 +70,11 @@ function sessionPath(notesDir: string, id: string | null): string | null {
   if (!notesDir || !id || basename(id) !== id || !SESSION_FILE.test(id)) return null;
   const full = join(resolve(notesDir), id);
   return existsSync(full) ? full : null;
+}
+
+function readSummary(notesDir: string, id: string): string | null {
+  const p = join(resolve(notesDir), summaryFileFor(id));
+  return existsSync(p) ? readFileSync(p, "utf8") : null;
 }
 
 export function startUI(port: number, meta: { agentName: string; callMic: string; monitor: string }, handlers: UIHandlers = {}): UI {
@@ -105,7 +115,26 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
     if (path === "/session") {
       const p = sessionPath(notesDir, url.searchParams.get("id"));
       if (!p) return json(res, 404, { error: "not found" });
-      return json(res, 200, { id: basename(p), content: readFileSync(p, "utf8") });
+      const id = basename(p);
+      return json(res, 200, { id, content: readFileSync(p, "utf8"), summary: readSummary(notesDir, id) });
+    }
+    if (path === "/summary") {
+      const p = sessionPath(notesDir, url.searchParams.get("id"));
+      if (!p) return json(res, 404, { error: "not found" });
+      return json(res, 200, { summary: readSummary(notesDir, basename(p)) });
+    }
+    if (req.method === "POST" && path === "/summarize") {
+      const p = sessionPath(notesDir, url.searchParams.get("id"));
+      if (!p || !handlers.onSummarize) return json(res, 404, { error: "not found" });
+      const id = basename(p);
+      void handlers
+        .onSummarize(readFileSync(p, "utf8"))
+        .then((summary) => {
+          writeFileSync(join(resolve(notesDir), summaryFileFor(id)), summary);
+          json(res, 200, { summary });
+        })
+        .catch((e) => json(res, 500, { error: String(e?.message || e) }));
+      return;
     }
     if (path === "/download") {
       const p = sessionPath(notesDir, url.searchParams.get("id"));

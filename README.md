@@ -18,6 +18,7 @@ never knows it's there.
 - **Context-aware** — stays silent on "Thanks, Otto" or when one person is talking
   to another participant.
 - **Recall across meetings** — "Otto, what did we decide about pricing last week?"
+- **Meeting-records dashboard** (http://localhost:4848) — your hub for everything: start/end sessions, browse every past meeting (search included), read live + saved transcripts, generate an LLM **summary** (Summary / Key points / Decisions / Action items), and **download** any transcript as `.md`. Deep-link a meeting with `?open=<id>`.
 
 ## Requirements
 

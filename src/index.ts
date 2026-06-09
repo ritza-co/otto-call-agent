@@ -17,7 +17,7 @@ import { capture, playPCMControllable, rms16, stereoToMono, type Playback } from
 import { CallMixer } from "./mixer.js";
 import { openSTT, type STTConnection } from "./deepgram.js";
 import { WakeWord } from "./wakeword.js";
-import { createLLM } from "./llm.js";
+import { createLLM, summarizeMeeting } from "./llm.js";
 import { synthesize, TTS_SAMPLE_RATE } from "./tts.js";
 import { TranscriptStore } from "./transcript.js";
 import { startUI } from "./ui.js";
@@ -108,7 +108,7 @@ function endSession(): void {
 const ui = startUI(
   UI_PORT,
   { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE },
-  { notesDir: NOTES_DIR, onStart: startSession, onEnd: endSession },
+  { notesDir: NOTES_DIR, onStart: startSession, onEnd: endSession, onSummarize: summarizeMeeting },
 );
 
 async function answer(question: string): Promise<void> {
