@@ -3,15 +3,19 @@
  *
  * Listens to a call (incoming audio + your mic), keeps a saved transcript, and
  * when anyone says "Otto, …" answers out loud — both on your speakers AND injected
- * into the call's microphone (BlackHole 16ch) so everyone on the call hears it.
+ * into the call's microphone so everyone on the call hears it.
+ *
+ * Sessions are controlled from the dashboard (Start/End): ending a session stops
+ * Otto listening; each session's transcript is saved to NOTES_DIR and browsable
+ * (and downloadable) from the dashboard.
  */
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import dotenv from "dotenv";
 dotenv.config();
 
 import { capture, playPCMControllable, rms16, stereoToMono, type Playback } from "./audio.js";
 import { CallMixer } from "./mixer.js";
-import { openSTT } from "./deepgram.js";
+import { openSTT, type STTConnection } from "./deepgram.js";
 import { WakeWord } from "./wakeword.js";
 import { createLLM } from "./llm.js";
 import { synthesize, TTS_SAMPLE_RATE } from "./tts.js";
@@ -22,16 +26,16 @@ import * as route from "./route.js";
 const AGENT_NAME = process.env.AGENT_NAME || "Otto";
 const HOST_NAME = process.env.HOST_NAME || "You";
 const MIC_DEVICE = process.env.MIC_DEVICE || "MacBook Air Microphone";
-const CALL_CAPTURE_DEVICE = process.env.CALL_CAPTURE_DEVICE || "BlackHole 16ch"; // call's incoming audio
-const CALL_MIC_DEVICE = process.env.CALL_MIC_DEVICE || "BlackHole 2ch"; // inject Otto here (stereo); call app's mic
+const CALL_CAPTURE_DEVICE = process.env.CALL_CAPTURE_DEVICE || "BlackHole 16ch";
+const CALL_MIC_DEVICE = process.env.CALL_MIC_DEVICE || "BlackHole 2ch";
 const MONITOR_DEVICE = process.env.MONITOR_DEVICE || "MacBook Air Speakers";
-const ROUTE_DEVICE = process.env.ROUTE_DEVICE || "Otto Monitor"; // multi-output created by setup
+const ROUTE_DEVICE = process.env.ROUTE_DEVICE || "Otto Monitor";
 const NOTES_DIR = resolve(process.env.NOTES_DIR || "./notes");
 const UI_PORT = Number(process.env.UI_PORT || 4848);
 const STITCH_WINDOW_MS = 12_000;
 
-const CALL_FMT = { sampleRate: 16000, channels: 1 }; // call capture → STT
-const MIC_FMT = { sampleRate: 48000, channels: 2 }; // mic capture → mixer (+ downmixed to STT)
+const CALL_FMT = { sampleRate: 16000, channels: 1 };
+const MIC_FMT = { sampleRate: 48000, channels: 2 };
 
 if (!process.env.DEEPGRAM_API_KEY) {
   console.error("Missing DEEPGRAM_API_KEY. Copy .env.example to .env and fill it in.");
@@ -43,46 +47,82 @@ function isAcknowledgement(text: string): boolean {
   return /\b(thanks|thank you|thank u|cheers|got it|appreciate|nice one|good (job|stuff|one)|perfect|awesome|great job|never mind|nevermind)\b/.test(t);
 }
 
-const transcript = new TranscriptStore(NOTES_DIR, new Date().toISOString());
 const wake = new WakeWord(AGENT_NAME);
 const llm = createLLM();
-// Duck your mic while Otto speaks (default true) so Otto's speaker-echo can't
-// loop back into the call. Set DUCK_WHILE_SPEAKING=false on headphones.
 const DUCK = (process.env.DUCK_WHILE_SPEAKING ?? "true").toLowerCase() !== "false";
 const mixer = new CallMixer(CALL_MIC_DEVICE, MIC_FMT, DUCK);
-
-// Barge-in: while Otto speaks, if you start talking, cut him off. Only safe when
-// your mic doesn't also hear Otto — i.e. on headphones (DUCK off). On speakers
-// Otto's echo would self-interrupt, so it's disabled there.
 const BARGE_IN = !DUCK;
-const BARGE_RMS = Number(process.env.BARGE_RMS || 0.05); // mic level that counts as "talking"
+const BARGE_RMS = Number(process.env.BARGE_RMS || 0.05);
+
 let currentPlayback: Playback | null = null;
 let loudFrames = 0;
 
-function interrupt(): void {
-  mixer.cancel(); // stop injecting Otto into the call
-  currentPlayback?.stop(); // stop Otto on your monitor
-}
-const ui = startUI(UI_PORT, { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE });
-
+// --- session state (controlled from the dashboard) ---
+let sessionActive = false;
+let transcript: TranscriptStore | null = null;
+let callStt: STTConnection | null = null;
+let micStt: STTConnection | null = null;
 let answering = false;
 let awaitingQuestion = false;
 let awaitingSince = 0;
 let lastLine: { text: string; at: number } | null = null;
 
+function interrupt(): void {
+  mixer.cancel();
+  currentPlayback?.stop();
+}
+
+function startSession(): void {
+  if (sessionActive) return;
+  transcript = new TranscriptStore(NOTES_DIR, new Date().toISOString());
+  awaitingQuestion = false;
+  lastLine = null;
+  answering = false;
+  callStt = openSTT(
+    { diarize: true, keyterm: [AGENT_NAME], ...CALL_FMT },
+    { onUtterance: ({ speaker, text }) => handleUtterance(`Speaker ${speaker + 1}`, text), onError: (e) => console.error("call STT:", e) },
+  );
+  micStt = openSTT(
+    { diarize: false, keyterm: [AGENT_NAME], sampleRate: MIC_FMT.sampleRate, channels: 1 },
+    { onUtterance: ({ text }) => handleUtterance(HOST_NAME, text), onError: (e) => console.error("mic STT:", e) },
+  );
+  sessionActive = true;
+  ui.emit({ type: "reset" });
+  ui.emit({ type: "session", active: true, id: basename(transcript.savedAt) });
+  ui.emit({ type: "state", state: "listening" });
+  console.log(`▶ session started → ${transcript.savedAt}`);
+}
+
+function endSession(): void {
+  if (!sessionActive) return;
+  sessionActive = false;
+  interrupt();
+  callStt?.close();
+  micStt?.close();
+  callStt = null;
+  micStt = null;
+  ui.emit({ type: "session", active: false, id: transcript ? basename(transcript.savedAt) : undefined });
+  console.log(`⏹ session ended${transcript ? ` → ${transcript.savedAt}` : ""}`);
+}
+
+const ui = startUI(
+  UI_PORT,
+  { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE },
+  { notesDir: NOTES_DIR, onStart: startSession, onEnd: endSession },
+);
+
 async function answer(question: string): Promise<void> {
-  if (answering) return;
+  if (!sessionActive || !transcript || answering) return;
+  const t = transcript;
   answering = true;
   ui.emit({ type: "state", state: "thinking" });
   try {
     const result = await llm.answer({
       agentName: AGENT_NAME,
-      transcript: transcript.asText(),
+      transcript: t.asText(),
       question,
-      participants: [...transcript.participants],
-      // Cap past-meeting notes in the prompt — smaller input = faster LLM. Recent
-      // notes are usually enough; raise if you need deeper cross-meeting recall.
-      notesArchive: transcript.loadArchive(6000),
+      participants: [...t.participants],
+      notesArchive: t.loadArchive(6000),
     });
     if (!result.respond || !result.text) {
       console.log(`${AGENT_NAME} … (stayed silent — not addressed)`);
@@ -90,15 +130,15 @@ async function answer(question: string): Promise<void> {
     }
     const tag = result.searched ? ` 🌐 ${result.sources[0] ?? "web"}` : "";
     console.log(`\n${AGENT_NAME} ▶ ${result.text}${tag}\n`);
-    transcript.add(AGENT_NAME, result.text);
+    t.add(AGENT_NAME, result.text);
     ui.emit({ type: "line", kind: "agent", speaker: AGENT_NAME, text: result.text, searched: result.searched, sources: result.sources });
 
     try {
-      const pcm = await synthesize(result.text); // mono 48k
+      const pcm = await synthesize(result.text);
       ui.emit({ type: "state", state: "speaking" });
-      mixer.speak(pcm); // → everyone on the call hears Otto
-      currentPlayback = playPCMControllable(MONITOR_DEVICE, pcm, { sampleRate: TTS_SAMPLE_RATE, channels: 1 }); // → you hear Otto
-      await currentPlayback.done; // resolves on completion OR barge-in stop()
+      mixer.speak(pcm);
+      currentPlayback = playPCMControllable(MONITOR_DEVICE, pcm, { sampleRate: TTS_SAMPLE_RATE, channels: 1 });
+      await currentPlayback.done;
       currentPlayback = null;
     } catch (err) {
       console.error("TTS/playback failed:", err);
@@ -107,12 +147,12 @@ async function answer(question: string): Promise<void> {
     console.error("LLM failed:", err);
   } finally {
     answering = false;
-    ui.emit({ type: "state", state: "listening" });
+    if (sessionActive) ui.emit({ type: "state", state: "listening" });
   }
 }
 
 function handleUtterance(speaker: string, text: string): void {
-  if (answering) return; // ignore audio while Otto is speaking (avoids self-trigger)
+  if (!sessionActive || !transcript || answering) return;
 
   transcript.add(speaker, text);
   console.log(`${speaker}: ${text}`);
@@ -155,8 +195,6 @@ function handleUtterance(speaker: string, text: string): void {
 }
 
 async function main() {
-  // Route system output through the monitor device so we capture the call while
-  // you still hear it. Restored on exit.
   let prevOutput: string | null = null;
   if (await route.available()) {
     const outs = await route.listOutputs();
@@ -165,29 +203,27 @@ async function main() {
       await route.setOutput(ROUTE_DEVICE);
       console.log(`🔀 system output → "${ROUTE_DEVICE}" (was "${prevOutput}")`);
     } else {
-      console.log(`⚠️  Monitor device "${ROUTE_DEVICE}" not found — run \`npm run setup\`. Call audio capture may be silent until then.`);
+      console.log(`⚠️  Monitor device "${ROUTE_DEVICE}" not found — call-audio capture off (fine for solo).`);
     }
   }
 
-  const callStt = openSTT(
-    { diarize: true, keyterm: [AGENT_NAME], ...CALL_FMT },
-    { onUtterance: ({ speaker, text }) => handleUtterance(`Speaker ${speaker + 1}`, text), onError: (e) => console.error("call STT:", e) },
+  // Captures run continuously; audio only reaches STT while a session is active.
+  const callCap = await capture(
+    CALL_CAPTURE_DEVICE,
+    CALL_FMT,
+    (c) => {
+      if (sessionActive) callStt?.send(c);
+    },
+    (e) => console.error("call capture:", e),
   );
-  const micStt = openSTT(
-    { diarize: false, keyterm: [AGENT_NAME], sampleRate: MIC_FMT.sampleRate, channels: 1 },
-    { onUtterance: ({ text }) => handleUtterance(HOST_NAME, text), onError: (e) => console.error("mic STT:", e) },
-  );
-
-  const callCap = await capture(CALL_CAPTURE_DEVICE, CALL_FMT, (c) => callStt.send(c), (e) => console.error("call capture:", e));
   const micCap = await capture(
     MIC_DEVICE,
     MIC_FMT,
     (stereo) => {
-      mixer.pushMic(stereo); // passthrough your voice into the call + mix Otto
-      micStt.send(stereoToMono(stereo)); // transcribe you
+      mixer.pushMic(stereo); // your voice → the call (always, so you're heard)
+      if (sessionActive) micStt?.send(stereoToMono(stereo)); // transcribe only while listening
 
-      // Barge-in: sustained mic level while Otto is speaking → stop him.
-      if (BARGE_IN && mixer.speaking) {
+      if (sessionActive && BARGE_IN && mixer.speaking) {
         if (rms16(stereo) > BARGE_RMS) {
           if (++loudFrames >= 3) {
             console.log(`${AGENT_NAME} ⏹  (interrupted)`);
@@ -204,26 +240,24 @@ async function main() {
     (e) => console.error("mic capture:", e),
   );
 
+  startSession(); // auto-start a session on boot
+
   console.log(`\n🎙️  Otto Call Agent — live`);
-  console.log(`   wake word : "${AGENT_NAME}"`);
-  console.log(`   call audio: ${CALL_CAPTURE_DEVICE}   your mic: ${MIC_DEVICE}`);
-  console.log(`   call mic  : ${CALL_MIC_DEVICE}  ← set your call app's microphone to this`);
+  console.log(`   wake word : "${AGENT_NAME}"   call mic: ${CALL_MIC_DEVICE}`);
   console.log(`   you hear  : ${MONITOR_DEVICE}   LLM: ${process.env.LLM_PROVIDER || "openai"}/${process.env.LLM_MODEL || "gpt-4o-mini"}`);
-  console.log(`   UI        : ${ui.url}`);
-  console.log(`   transcript: ${transcript.savedAt}\n`);
-  console.log(`Anyone on the call can say "${AGENT_NAME}, …" to ask a question. Ctrl-C to stop.\n`);
+  console.log(`   dashboard : ${ui.url}  (Start/End + history)`);
+  console.log(`   notes dir : ${NOTES_DIR}\n`);
 
   let stopped = false;
   const shutdown = async () => {
     if (stopped) return;
     stopped = true;
+    endSession();
     callCap.stop();
     micCap.stop();
-    callStt.close();
-    micStt.close();
     mixer.stop();
     if (prevOutput) await route.setOutput(prevOutput);
-    console.log(`\nSaved transcript → ${transcript.savedAt}`);
+    console.log(`\nStopped. Transcripts in ${NOTES_DIR}`);
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
