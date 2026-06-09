@@ -97,10 +97,31 @@ function downsample48to16(mono48: Buffer): Buffer {
   return out;
 }
 
-// Echo-guard state: true while Otto is speaking (+ a short tail), so we pause
-// feeding the mic into the agent and it can't hear itself on speakers.
+// Echo-guard state: true while Otto's audio is actually playing out the speakers,
+// so we pause feeding the mic into the agent and it can't hear itself.
+//
+// Deepgram bursts the TTS faster than real time, but it PLAYS over its true
+// duration — so we track the real playback end from the bytes we've queued
+// (bytes ÷ rate), not the burst arrival. Keeps the guard up for the whole reply.
 let agentSpeaking = false;
+let playbackEndsAt = 0;
 let guardTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleGuardOff() {
+  if (guardTimer) clearTimeout(guardTimer);
+  const wait = Math.max(0, playbackEndsAt - Date.now()) + 400; // +tail for sox latency
+  guardTimer = setTimeout(() => {
+    if (Date.now() >= playbackEndsAt) agentSpeaking = false;
+    else scheduleGuardOff();
+  }, wait);
+}
+
+function noteOttoAudio(byteLength: number) {
+  const durMs = (byteLength / 2 / TTS_RATE) * 1000; // s16le mono
+  playbackEndsAt = Math.max(playbackEndsAt, Date.now()) + durMs;
+  agentSpeaking = true;
+  scheduleGuardOff();
+}
 
 const transcript = new TranscriptStore(NOTES_DIR, new Date().toISOString(), "Call");
 const ui = startUI(UI_PORT, { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE });
@@ -152,6 +173,7 @@ async function main() {
     {
       onSettingsApplied: () => console.log(`✅ Voice Agent live (Flux ${STT_MODEL} · Aura ${TTS_MODEL} · ${LLM_MODEL})`),
       onAudio: (pcm) => {
+        noteOttoAudio(pcm.length); // hold the echo guard for the real playback duration
         mixer.speak(pcm); // → into the call (everyone hears Otto)
         monitor.write(pcm); // → you hear Otto
       },
@@ -164,18 +186,10 @@ async function main() {
         ui.emit({ type: "line", kind: "agent", speaker: AGENT_NAME, text });
       },
       onState: (s) => {
-        if (s === "speaking") {
-          agentSpeaking = true;
-          if (guardTimer) clearTimeout(guardTimer);
-        } else {
-          if (s === "listening") mixer.cancel(); // drop any buffered Otto
-          // keep the guard up briefly after Otto stops to swallow speaker tail/reverb
-          if (agentSpeaking) {
-            if (guardTimer) clearTimeout(guardTimer);
-            guardTimer = setTimeout(() => (agentSpeaking = false), 600);
-          }
-        }
+        if (s === "listening") mixer.cancel(); // drop any buffered Otto
         ui.emit({ type: "state", state: s });
+        // Note: the echo guard is driven by actual audio playback (noteOttoAudio),
+        // not these state events — Deepgram bursts audio ahead of playback.
       },
       onFunctionCall: async (name, args) => {
         if (name === "web_search") {
