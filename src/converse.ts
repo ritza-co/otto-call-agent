@@ -32,6 +32,10 @@ const UI_PORT = Number(process.env.UI_PORT || 4848);
 const STT_MODEL = process.env.STT_MODEL || "flux-general-en";
 const TTS_MODEL = process.env.DEEPGRAM_TTS_MODEL || "aura-2-arcas-en";
 const LLM_MODEL = process.env.LLM_MODEL || "gpt-4o-mini";
+// On speakers, stop feeding the mic to the agent while Otto speaks, so his voice
+// from the speakers can't loop back in and re-trigger him. true (speakers) /
+// false (headphones — no acoustic path, keeps full mid-sentence barge-in).
+const ECHO_GUARD = (process.env.ECHO_GUARD ?? "true").toLowerCase() !== "false";
 
 const AGENT_RATE = 16000; // Voice Agent input
 const TTS_RATE = 48000; // Voice Agent output (we set it)
@@ -92,6 +96,11 @@ function downsample48to16(mono48: Buffer): Buffer {
   for (let i = 0; i < outN; i++) out.writeInt16LE(mono48.readInt16LE(i * 3 * 2), i * 2);
   return out;
 }
+
+// Echo-guard state: true while Otto is speaking (+ a short tail), so we pause
+// feeding the mic into the agent and it can't hear itself on speakers.
+let agentSpeaking = false;
+let guardTimer: ReturnType<typeof setTimeout> | null = null;
 
 const transcript = new TranscriptStore(NOTES_DIR, new Date().toISOString(), "Call");
 const ui = startUI(UI_PORT, { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE });
@@ -155,7 +164,17 @@ async function main() {
         ui.emit({ type: "line", kind: "agent", speaker: AGENT_NAME, text });
       },
       onState: (s) => {
-        if (s === "listening") mixer.cancel(); // user (re)started speaking → drop any buffered Otto
+        if (s === "speaking") {
+          agentSpeaking = true;
+          if (guardTimer) clearTimeout(guardTimer);
+        } else {
+          if (s === "listening") mixer.cancel(); // drop any buffered Otto
+          // keep the guard up briefly after Otto stops to swallow speaker tail/reverb
+          if (agentSpeaking) {
+            if (guardTimer) clearTimeout(guardTimer);
+            guardTimer = setTimeout(() => (agentSpeaking = false), 600);
+          }
+        }
         ui.emit({ type: "state", state: s });
       },
       onFunctionCall: async (name, args) => {
@@ -178,7 +197,11 @@ async function main() {
     MIC_FMT,
     (stereo) => {
       mixer.pushMic(stereo); // your voice → the call (+ Otto mixed in)
-      input.pushMic(downsample48to16(stereoToMono(stereo))); // your voice → the agent's ears
+      // Don't feed the agent your mic while Otto is speaking (echo guard), else
+      // his voice from the speakers loops back in and re-triggers him.
+      if (!(ECHO_GUARD && agentSpeaking)) {
+        input.pushMic(downsample48to16(stereoToMono(stereo))); // your voice → the agent's ears
+      }
     },
     (e) => console.error("mic capture:", e),
   );
