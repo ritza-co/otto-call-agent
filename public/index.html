@@ -339,18 +339,24 @@
       // ---------- boot ----------
       const params = new URLSearchParams(location.search);
       if (params.has("preview")) {
+        // Dev/preview + screenshot aid (never used in production runtime).
+        // ?preview renders a static dashboard. Add &beat=N to show only the first
+        // N transcript lines and &state=listening|thinking|speaking for the status.
         agentName = "Otto"; active = true; currentId = "live";
         meetings = [
-          { id: "live", title: "Call — now", date: "2026-06-09 15:40", lines: 14, hasSummary: false },
+          { id: "live", title: "Call — now", date: "2026-06-10 15:40", lines: 4, hasSummary: false },
           { id: "a-meeting.md", title: "Meeting — Q3 launch sync", date: "2026-06-08 10:02", lines: 88, hasSummary: true },
           { id: "b-meeting.md", title: "Meeting — Pricing review", date: "2026-06-05 14:30", lines: 132, hasSummary: true },
         ];
-        liveLines = [
-          { kind: "speech", speaker: "Priya", text: "Are we still targeting the 15th for the Q3 launch?" },
-          { kind: "speech", speaker: "Marcus", text: "Yes, pending the capital budget sign-off." },
-          { kind: "speech", speaker: "You", text: "Otto, what's the USD to EUR rate right now?" },
-          { kind: "agent", speaker: "Otto", text: "It's about 1.08 dollars per euro.", searched: true, sources: ["xe.com"] },
+        const script = [
+          { kind: "speech", speaker: "Priya", text: "Okay, before we wrap up, did we ever lock in a date for the customer webinar?" },
+          { kind: "speech", speaker: "Marcus", text: "I think we said the 20th, but I'm not totally sure it got confirmed." },
+          { kind: "speech", speaker: "You", text: "Otto, when did we decide the webinar was?" },
+          { kind: "agent", speaker: "Otto", text: "You set it for Thursday the 20th in last week's planning call, right after the budget sign off." },
         ];
+        const beat = params.has("beat") ? Math.max(0, Number(params.get("beat"))) : script.length;
+        liveLines = script.slice(0, beat);
+        ottoState = params.get("state") || "listening";
         renderList(); renderMain();
       } else {
         const openId = params.get("open"); // deep-link to a specific meeting record
