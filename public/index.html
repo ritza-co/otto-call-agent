@@ -96,6 +96,9 @@
       .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
       .btn.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); color: #fff; }
       .btn:disabled { opacity: 0.5; cursor: default; }
+      .btn.muted { background: #b3422f; border-color: #b3422f; color: #fff; }
+      .btn.muted:hover { background: #9a3727; border-color: #9a3727; color: #fff; }
+      .muted-chip { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; color: #b3422f; }
 
       .section { margin-top: 26px; }
       .section-h { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; }
@@ -160,6 +163,7 @@
       let ottoState = "listening";
       let liveLines = [];         // {kind,speaker,text,searched,sources}
       let interimText = "";
+      let muted = false;          // your mic muted into Otto + the call
 
       const esc = (s) => (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
       const mdInline = (s) => s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
@@ -227,8 +231,9 @@
         const summarizeLabel = opts.hasSummary ? "Re-summarize" : "Summarize meeting";
         const summarize = id ? `<button class="btn primary" id="summarizeBtn">${summarizeLabel}</button>` : "";
         const download = id ? `<a class="btn" href="/download?id=${encodeURIComponent(id)}" download>Download .md</a>` : "";
+        const mute = opts.live ? `<button class="btn${muted ? " muted" : ""}" id="muteBtn">${muted ? "Unmute" : "Mute"}</button>` : "";
         const end = opts.live ? `<button class="btn" id="endBtn">End session</button>` : "";
-        return `<div class="rec-head"><div><div class="rec-title">${esc(title)}</div><div class="rec-meta">${metaInner}</div></div><div class="actions">${summarize}${download}${end}</div></div>`;
+        return `<div class="rec-head"><div><div class="rec-title">${esc(title)}</div><div class="rec-meta">${metaInner}</div></div><div class="actions">${summarize}${mute}${download}${end}</div></div>`;
       }
 
       function renderMain() {
@@ -241,7 +246,8 @@
         const statusPill = active
           ? `<span class="status" data-state="${ottoState}"><span class="s-dot"></span>${agentName} · ${ottoState}</span>`
           : `<span class="status"><span class="s-dot"></span>session ended</span>`;
-        const meta = `${statusPill}<span>say “${esc(agentName)}, …” to ask</span>`;
+        const mutedChip = muted ? `<span class="muted-chip">🔇 you're muted</span>` : "";
+        const meta = `${statusPill}${mutedChip}<span>say “${esc(agentName)}, …” to ask</span>`;
         const header = headerHtml("Live meeting", meta, { id: active ? currentId : currentId, live: active, hasSummary: m && m.hasSummary });
         let body = liveLines.map((l) => transcriptRow(l.speaker, l.text, l.searched, l.sources, false)).join("");
         if (interimText) body += transcriptRow(agentName === "" ? "" : "…", interimText, false, null, true);
@@ -275,6 +281,8 @@
         if (sBtn) sBtn.onclick = () => summarize(id, sBtn);
         const eBtn = $("endBtn");
         if (eBtn) eBtn.onclick = endStartToggle;
+        const mBtn = $("muteBtn");
+        if (mBtn) mBtn.onclick = () => fetch("/control/mute", { method: "POST" }).catch(() => {});
       }
 
       async function summarize(id, btn) {
@@ -308,6 +316,8 @@
           sessionBtn.dataset.active = String(active);
           sessionBtn.querySelector(".rec") || sessionBtn.insertAdjacentHTML("afterbegin", '<span class="rec"></span>');
           refreshList().then(() => { if (viewingLive()) renderMain(); });
+        } else if (ev.type === "muted") {
+          muted = ev.muted; if (viewingLive()) renderLive();
         } else if (ev.type === "reset") {
           liveLines = []; interimText = ""; if (viewingLive()) renderLive();
         } else if (ev.type === "state") {

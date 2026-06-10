@@ -75,10 +75,17 @@ let answering = false;
 let awaitingQuestion = false;
 let awaitingSince = 0;
 let lastLine: { text: string; at: number } | null = null;
+let micMuted = false; // your mic muted into both Otto (recording) and the call
 
 function interrupt(): void {
   mixer.cancel();
   currentPlayback?.stop();
+}
+
+function toggleMute(): void {
+  micMuted = !micMuted;
+  ui.emit({ type: "muted", muted: micMuted });
+  console.log(micMuted ? "🔇 mic muted" : "🔈 mic unmuted");
 }
 
 function startSession(): void {
@@ -117,7 +124,7 @@ function endSession(): void {
 const ui = startUI(
   UI_PORT,
   { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE },
-  { notesDir: NOTES_DIR, onStart: startSession, onEnd: endSession, onSummarize: summarizeMeeting },
+  { notesDir: NOTES_DIR, onStart: startSession, onEnd: endSession, onMute: toggleMute, onSummarize: summarizeMeeting },
 );
 
 async function answer(question: string): Promise<void> {
@@ -230,6 +237,13 @@ async function main() {
     MIC_DEVICE,
     MIC_FMT,
     (stereo) => {
+      if (micMuted) {
+        // Feed silence so Otto's TTS still flows into the call, but your voice
+        // doesn't — and don't transcribe/record you.
+        mixer.pushMic(Buffer.alloc(stereo.length));
+        loudFrames = 0;
+        return;
+      }
       mixer.pushMic(stereo); // your voice → the call (always, so you're heard)
       if (sessionActive) micStt?.send(stereoToMono(stereo)); // transcribe only while listening
 

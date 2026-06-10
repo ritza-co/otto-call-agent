@@ -18,6 +18,7 @@ export type UiEvent =
   | { type: "meta"; agentName: string; callMic: string; monitor: string }
   | { type: "state"; state: AgentState }
   | { type: "session"; active: boolean; id?: string } // session started/ended
+  | { type: "muted"; muted: boolean } // your mic muted into Otto + the call
   | { type: "reset" } // clear the live feed (new session)
   | { type: "line"; kind: "speech" | "agent"; speaker: string; text: string; searched?: boolean; sources?: string[] };
 
@@ -25,6 +26,7 @@ export interface UIHandlers {
   notesDir?: string;
   onStart?: () => void;
   onEnd?: () => void;
+  onMute?: () => void; // toggle your mic
   /** Produce a Markdown summary for a transcript (LLM lives in the agent). */
   onSummarize?: (transcript: string) => Promise<string>;
 }
@@ -84,6 +86,7 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
   const metaEvent: UiEvent = { type: "meta", ...meta };
   let lastState: UiEvent = { type: "state", state: "listening" };
   let lastSession: UiEvent = { type: "session", active: true };
+  let lastMuted: UiEvent = { type: "muted", muted: false };
 
   const json = (res: ServerResponse, code: number, body: unknown) => {
     res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
@@ -97,7 +100,7 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
     if (path === "/events") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       clients.add(res);
-      for (const ev of [metaEvent, lastSession, lastState]) res.write(`data: ${JSON.stringify(ev)}\n\n`);
+      for (const ev of [metaEvent, lastSession, lastMuted, lastState]) res.write(`data: ${JSON.stringify(ev)}\n\n`);
       req.on("close", () => clients.delete(res));
       return;
     }
@@ -107,6 +110,10 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
     }
     if (req.method === "POST" && path === "/control/end") {
       handlers.onEnd?.();
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === "POST" && path === "/control/mute") {
+      handlers.onMute?.();
       return json(res, 200, { ok: true });
     }
     if (path === "/sessions") {
@@ -169,6 +176,7 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
     emit(event: UiEvent) {
       if (event.type === "state") lastState = event;
       if (event.type === "session") lastSession = event;
+      if (event.type === "muted") lastMuted = event;
       const data = `data: ${JSON.stringify(event)}\n\n`;
       for (const c of clients) c.write(data);
     },
