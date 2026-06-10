@@ -13,7 +13,7 @@ import { basename, resolve } from "node:path";
 import dotenv from "dotenv";
 dotenv.config();
 
-import { capture, playPCMControllable, rms16, stereoToMono, type Playback } from "./audio.js";
+import { capture, PcmSink, playPCMControllable, rms16, stereoToMono, type Playback } from "./audio.js";
 import { CallMixer } from "./mixer.js";
 import { openSTT, type STTConnection } from "./deepgram.js";
 import { WakeWord } from "./wakeword.js";
@@ -34,7 +34,12 @@ const NOTES_DIR = resolve(process.env.NOTES_DIR || "./notes");
 const UI_PORT = Number(process.env.UI_PORT || 4848);
 const STITCH_WINDOW_MS = 12_000;
 
-const CALL_FMT = { sampleRate: 16000, channels: 1 };
+// Relay mode (Bluetooth-friendly full capture): the call app's SPEAKER is set to
+// BlackHole 16ch; Otto transcribes that AND plays it to your headphones, so you
+// hear the call without a Multi-Output device. Higher capture rate for nicer
+// playback quality. Costs ~150–300ms of added latency hearing others.
+const RELAY_CALL = (process.env.RELAY_CALL ?? "false").toLowerCase() === "true";
+const CALL_FMT = { sampleRate: RELAY_CALL ? 48000 : 16000, channels: 1 };
 const MIC_FMT = { sampleRate: 48000, channels: 2 };
 
 if (!process.env.DEEPGRAM_API_KEY) {
@@ -51,6 +56,10 @@ const wake = new WakeWord(AGENT_NAME);
 const llm = createLLM();
 const DUCK = (process.env.DUCK_WHILE_SPEAKING ?? "true").toLowerCase() !== "false";
 const mixer = new CallMixer(CALL_MIC_DEVICE, MIC_FMT, DUCK);
+// Relay sink: streams the captured call audio to your headphones so you hear the
+// call (Bluetooth as a normal single output — no aggregate). Runs independent of
+// the Otto session, so you keep hearing the call even when Otto isn't listening.
+const relaySink = RELAY_CALL ? new PcmSink(MONITOR_DEVICE, CALL_FMT) : null;
 const BARGE_IN = !DUCK;
 const BARGE_RMS = Number(process.env.BARGE_RMS || 0.05);
 
@@ -212,7 +221,8 @@ async function main() {
     CALL_CAPTURE_DEVICE,
     CALL_FMT,
     (c) => {
-      if (sessionActive) callStt?.send(c);
+      if (sessionActive) callStt?.send(c); // transcribe the call
+      relaySink?.write(c); // …and play it to your headphones (relay mode)
     },
     (e) => console.error("call capture:", e),
   );
@@ -256,6 +266,7 @@ async function main() {
     callCap.stop();
     micCap.stop();
     mixer.stop();
+    relaySink?.stop();
     if (prevOutput) await route.setOutput(prevOutput);
     console.log(`\nStopped. Transcripts in ${NOTES_DIR}`);
     process.exit(0);
