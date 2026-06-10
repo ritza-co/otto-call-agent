@@ -13,34 +13,30 @@ import { basename, resolve } from "node:path";
 import dotenv from "dotenv";
 dotenv.config();
 
-import { capture, PcmSink, playPCMControllable, rms16, stereoToMono, type Playback } from "./audio.js";
+import { capture, playPCMControllable, rms16, stereoToMono, type Playback } from "./audio.js";
 import { CallMixer } from "./mixer.js";
+import { createSystemAudioCapture } from "./capture/index.js";
 import { openSTT, type STTConnection } from "./deepgram.js";
 import { WakeWord } from "./wakeword.js";
 import { createLLM, summarizeMeeting } from "./llm.js";
 import { synthesize, TTS_SAMPLE_RATE } from "./tts.js";
 import { TranscriptStore } from "./transcript.js";
 import { startUI } from "./ui.js";
-import * as route from "./route.js";
 
 const AGENT_NAME = process.env.AGENT_NAME || "Otto";
 const HOST_NAME = process.env.HOST_NAME || "You";
 const MIC_DEVICE = process.env.MIC_DEVICE || "MacBook Air Microphone";
-const CALL_CAPTURE_DEVICE = process.env.CALL_CAPTURE_DEVICE || "BlackHole 16ch";
 const CALL_MIC_DEVICE = process.env.CALL_MIC_DEVICE || "BlackHole 2ch";
 const MONITOR_DEVICE = process.env.MONITOR_DEVICE || "MacBook Air Speakers";
-const ROUTE_DEVICE = process.env.ROUTE_DEVICE || "Otto Monitor";
 const NOTES_DIR = resolve(process.env.NOTES_DIR || "./notes");
 const UI_PORT = Number(process.env.UI_PORT || 4848);
 const STITCH_WINDOW_MS = 12_000;
 
-// Relay mode (Bluetooth-friendly full capture): the call app's SPEAKER is set to
-// BlackHole 16ch; Otto transcribes that AND plays it to your headphones, so you
-// hear the call without a Multi-Output device. Higher capture rate for nicer
-// playback quality. Costs ~150–300ms of added latency hearing others.
-const RELAY_CALL = (process.env.RELAY_CALL ?? "false").toLowerCase() === "true";
-const CALL_FMT = { sampleRate: RELAY_CALL ? 48000 : 16000, channels: 1 };
 const MIC_FMT = { sampleRate: 48000, channels: 2 };
+// The call's incoming audio is captured from the system-output mix by a CoreAudio
+// process tap (no routing or device changes — you keep hearing the call natively).
+// Its native rate is discovered when the tap starts; callStt opens at that rate.
+let callSampleRate = 44100;
 
 if (!process.env.DEEPGRAM_API_KEY) {
   console.error("Missing DEEPGRAM_API_KEY. Copy .env.example to .env and fill it in.");
@@ -56,10 +52,6 @@ const wake = new WakeWord(AGENT_NAME);
 const llm = createLLM();
 const DUCK = (process.env.DUCK_WHILE_SPEAKING ?? "true").toLowerCase() !== "false";
 const mixer = new CallMixer(CALL_MIC_DEVICE, MIC_FMT, DUCK);
-// Relay sink: streams the captured call audio to your headphones so you hear the
-// call (Bluetooth as a normal single output — no aggregate). Runs independent of
-// the Otto session, so you keep hearing the call even when Otto isn't listening.
-const relaySink = RELAY_CALL ? new PcmSink(MONITOR_DEVICE, CALL_FMT) : null;
 const BARGE_IN = !DUCK;
 const BARGE_RMS = Number(process.env.BARGE_RMS || 0.05);
 
@@ -76,6 +68,7 @@ let awaitingQuestion = false;
 let awaitingSince = 0;
 let lastLine: { text: string; at: number } | null = null;
 let micMuted = false; // your mic muted into both Otto (recording) and the call
+let ottoSpeaking = false; // gate: don't transcribe the call while Otto's own TTS is playing out
 
 function interrupt(): void {
   mixer.cancel();
@@ -99,7 +92,7 @@ function startSession(): void {
   lastLine = null;
   answering = false;
   callStt = openSTT(
-    { diarize: true, keyterm: [AGENT_NAME], ...CALL_FMT },
+    { diarize: true, keyterm: [AGENT_NAME], sampleRate: callSampleRate, channels: 1 },
     { onUtterance: ({ speaker, text }) => handleUtterance(`Speaker ${speaker + 1}`, text), onError: (e) => console.error("call STT:", e) },
   );
   micStt = openSTT(
@@ -127,7 +120,7 @@ function endSession(): void {
 
 const ui = startUI(
   UI_PORT,
-  { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE },
+  { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: MONITOR_DEVICE },
   { notesDir: NOTES_DIR, onStart: startSession, onEnd: endSession, onMute: setMute, onSummarize: summarizeMeeting },
 );
 
@@ -156,12 +149,16 @@ async function answer(question: string): Promise<void> {
     try {
       const pcm = await synthesize(result.text);
       ui.emit({ type: "state", state: "speaking" });
+      ottoSpeaking = true; // stop tapping the call so Otto's own voice isn't transcribed back
       mixer.speak(pcm);
       currentPlayback = playPCMControllable(MONITOR_DEVICE, pcm, { sampleRate: TTS_SAMPLE_RATE, channels: 1 });
       await currentPlayback.done;
       currentPlayback = null;
     } catch (err) {
       console.error("TTS/playback failed:", err);
+    } finally {
+      // brief tail so Otto's played-out audio fully drains from the tap before we listen again
+      setTimeout(() => { ottoSpeaking = false; }, 250);
     }
   } catch (err) {
     console.error("LLM failed:", err);
@@ -215,28 +212,20 @@ function handleUtterance(speaker: string, text: string): void {
 }
 
 async function main() {
-  let prevOutput: string | null = null;
-  if (await route.available()) {
-    const outs = await route.listOutputs();
-    if (outs.includes(ROUTE_DEVICE)) {
-      prevOutput = await route.currentOutput();
-      await route.setOutput(ROUTE_DEVICE);
-      console.log(`🔀 system output → "${ROUTE_DEVICE}" (was "${prevOutput}")`);
-    } else {
-      console.log(`⚠️  Monitor device "${ROUTE_DEVICE}" not found — call-audio capture off (fine for solo).`);
-    }
-  }
+  // The call's incoming audio is tapped from the system-output mix via a CoreAudio
+  // process tap — no routing or device changes, so you keep hearing the call
+  // natively (no relay lag). Captures run continuously; audio only reaches STT
+  // while a session is active, and never while Otto is speaking (echo gate).
+  const sysCap = await createSystemAudioCapture({
+    onAuthError: (m) => console.error(`⚠️  ${m}`),
+    onError: (e) => console.error("call capture:", e),
+  });
+  callSampleRate = sysCap.sampleRate;
+  sysCap.onData((c) => {
+    if (sessionActive && !ottoSpeaking) callStt?.send(c);
+  });
+  console.log(`🎧 system-audio tap live (${callSampleRate} Hz) — your output device is unchanged`);
 
-  // Captures run continuously; audio only reaches STT while a session is active.
-  const callCap = await capture(
-    CALL_CAPTURE_DEVICE,
-    CALL_FMT,
-    (c) => {
-      if (sessionActive) callStt?.send(c); // transcribe the call
-      relaySink?.write(c); // …and play it to your headphones (relay mode)
-    },
-    (e) => console.error("call capture:", e),
-  );
   const micCap = await capture(
     MIC_DEVICE,
     MIC_FMT,
@@ -277,15 +266,13 @@ async function main() {
   console.log(`   notes dir : ${NOTES_DIR}\n`);
 
   let stopped = false;
-  const shutdown = async () => {
+  const shutdown = () => {
     if (stopped) return;
     stopped = true;
     endSession();
-    callCap.stop();
+    sysCap.stop();
     micCap.stop();
     mixer.stop();
-    relaySink?.stop();
-    if (prevOutput) await route.setOutput(prevOutput);
     console.log(`\nStopped. Transcripts in ${NOTES_DIR}`);
     process.exit(0);
   };

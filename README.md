@@ -6,7 +6,9 @@ locally, and — the impressive part — **anyone on the call can say "Otto, …
 the reply is spoken into the call so everyone hears it.**
 
 No browser, no platform plugin. It works at the OS audio layer, so the call app
-never knows it's there.
+never knows it's there — and it **never changes your audio settings**: the call's
+audio is captured with a CoreAudio process tap, so your system output is untouched
+and you keep hearing the call natively (no routing, no Multi-Output device, no lag).
 
 ## What it does
 
@@ -22,49 +24,54 @@ never knows it's there.
 
 ## Requirements
 
-macOS, with (the setup script installs/creates what's missing):
+macOS **14.4+** (for CoreAudio process taps), with (the setup script installs/checks what's missing):
 
-- [Homebrew](https://brew.sh), `ffmpeg`, `sox`
-- [BlackHole](https://existential.audio/blackhole/) **2ch** and **16ch**
-  (`brew install blackhole-2ch blackhole-16ch`)
-- `switchaudio-osx` (`brew install switchaudio-osx`)
-- Xcode command-line tools (`xcode-select --install`) — only for auto-creating the
-  monitor device; otherwise the setup prints manual steps.
+- [Homebrew](https://brew.sh), `ffmpeg` (mic capture), `sox` (plays Otto's voice back to you)
+- [BlackHole](https://existential.audio/blackhole/) **2ch** — the *only* virtual
+  device needed, and only to inject Otto's voice into the call (`brew install blackhole-2ch`)
+- Xcode command-line tools (`xcode-select --install`) — to build the tap bundle (`bin/OttoTap.app`)
 
 ## Setup
 
 ```bash
 npm install
 cp .env.example .env     # paste DEEPGRAM_API_KEY + OPENAI_API_KEY
-npm run setup            # checks tools, creates the "Otto Monitor" device, writes .env
+npm run setup            # checks tools, builds the tap bundle, writes .env
+npm run tap:grant        # click "Allow" once so the tap can hear the call
 ```
 
-`npm run setup` will finish by telling you the **one** manual step: set your call
-app's **microphone to `BlackHole 2ch`**, and use **headphones**.
+Then the **one** manual step: set your call app's **microphone to `BlackHole 2ch`**,
+and use **headphones**. Your system output / speaker is **not** changed.
 
 ## Audio routing (how it works)
 
 ```
- call incoming audio ─▶ system output = "Otto Monitor" (your output + BlackHole 16ch)
-                           ├─▶ your headphones (you hear the call, no lag)
-                           └─▶ BlackHole 16ch ─▶ capture ─┐
- your mic ───────────────────────────────────▶ capture ──┼─▶ Deepgram STT ─▶ transcript
-                                                          │        │ "Otto, …"
-                                                          │        ▼
-                                                          │   LLM (+web +notes)
-                                                          │        ▼  Aura TTS
- call app mic = BlackHole 2ch ◀── mixer: your mic + Otto ─┘   (everyone hears Otto)
+ call incoming audio ─▶ your output device (unchanged — you hear the call natively)
+                           │
+                           └─▶ CoreAudio process tap (bin/OttoTap.app) ─┐
+ your mic ─────────────────────────────────────────────▶ capture ──────┼─▶ Deepgram STT ─▶ transcript
+                                                                        │        │ "Otto, …"
+                                                                        │        ▼
+                                                                        │   LLM (+web +notes)
+                                                                        │        ▼  Aura TTS
+ call app mic = BlackHole 2ch ◀── mixer: your mic + Otto ───────────────┘   (everyone hears Otto)
 ```
 
+- **Process tap** — captures the system-output mix (the call's incoming audio) for
+  transcription, *without* changing your output device or adding any cable. Shipped
+  as a tiny ad-hoc-signed bundle (`bin/OttoTap.app`) because the macOS
+  `kTCCServiceAudioCapture` permission is only granted to a real bundle launched via
+  LaunchServices — hence `npm run tap:grant` (one click, remembered thereafter).
 - **`BlackHole 2ch`** — the call app's microphone. The app mixes your real mic +
-  Otto's voice into it.
-- **`BlackHole 16ch`** — carries the call's incoming audio to us for transcription.
-- **`Otto Monitor`** — a Multi-Output device (your real output + BlackHole 16ch) so
-  you keep hearing the call while we capture it. The app switches to it on start and
-  restores your output on exit.
+  Otto's voice into it so everyone on the call hears Otto.
+- Otto's TTS is also played to your output (`MONITOR_DEVICE`) so you hear it too. The
+  tap is muted for those moments so Otto never transcribes himself.
 
 > **Headphones matter:** if Otto plays out of speakers, your mic re-captures it and
 > the call gets an echo. Headphones avoid that.
+>
+> **Nothing to undo:** the tap changes no audio settings. `npm run teardown` stops it
+> and prints how to remove the optional BlackHole cable and the permission.
 
 ## Two modes
 
@@ -73,7 +80,7 @@ app's **microphone to `BlackHole 2ch`**, and use **headphones**.
 | `npm run dev` | **Custom pipeline** (the product) | Dual Deepgram STT (diarized call + your mic) → wake-word gate → context-aware LLM (web search + notes) → Aura TTS, injected into the call. Otto stays silent until called by name. **Recommended.** |
 | `npm run converse` | **Deepgram Voice Agent API** (experimental) | One socket: Flux STT + Aura + an OpenAI "think" brain. Impressive, but built for *active* 1:1 conversation — see "Why not the Voice Agent API?" below. |
 
-Both share the audio routing, transcript persistence, notes archive, and UI.
+Both share the audio capture, transcript persistence, notes archive, and UI.
 
 ### Why not the Voice Agent API?
 
@@ -92,6 +99,8 @@ a documented experiment.
 ```bash
 npm run dev        # the agent (Ctrl-C to stop; transcript saved to notes/)
 npm run devices    # list audio device names (for .env)
+npm run tap:grant  # re-grant the tap permission (e.g. after rebuilding it)
+npm run teardown   # stop the tap + clean up; nothing else to undo
 npm run converse   # experimental Voice Agent mode
 ```
 
@@ -105,26 +114,51 @@ Then join your call (mic = `BlackHole 2ch`). Anyone can say **"Otto, …"**.
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | per `LLM_PROVIDER` |
 | `LLM_PROVIDER` / `LLM_MODEL` | `openai`/`gpt-4o-mini` (default) or `anthropic`/`claude-sonnet-4-6` |
 | `AGENT_NAME` | wake word (default `Otto`) |
-| `MIC_DEVICE` / `CALL_CAPTURE_DEVICE` / `CALL_MIC_DEVICE` / `MONITOR_DEVICE` / `ROUTE_DEVICE` | audio devices (set by `npm run setup`) |
+| `MIC_DEVICE` | your real microphone (Otto records you from this) |
+| `CALL_MIC_DEVICE` | the call app's mic cable — `BlackHole 2ch` (Otto's voice is injected here) |
+| `MONITOR_DEVICE` | where Otto's spoken replies play back to you; `default` follows your current output (Bluetooth-safe) |
 | `NOTES_DIR` | where transcripts are saved (default `./notes`) |
+
+The call's incoming audio needs **no** device config — it's captured by the process tap.
+
+## Portability
+
+The OS audio glue is macOS-only, but the design ports cleanly — each platform just
+"captures what's playing":
+
+- **macOS:** CoreAudio process tap (this repo)
+- **Windows:** WASAPI loopback capture
+- **Linux:** PipeWire / PulseAudio monitor source
+
+Everything above the audio layer (Deepgram STT/TTS, wake-word, context-aware LLM,
+transcripts, dashboard) is plain Node/TS and runs anywhere. The capture seam lives
+in `src/capture/` — add a `winLoopback.ts` / `linuxMonitor.ts` and switch on it in
+`src/capture/index.ts`.
 
 ## Project layout
 
 ```
 src/
   index.ts       orchestration: capture → STT → wake → LLM → TTS → speak + inject
-  audio.ts       ffmpeg capture, sox playback, PcmSink (streaming output)
+  audio.ts       ffmpeg mic capture, sox playback, PcmSink (streaming output)
+  capture/
+    index.ts     platform-agnostic system-audio capture seam
+    macTap.ts    macOS impl: launches bin/OttoTap.app via `open`, reads PCM from a FIFO
   mixer.ts       CallMixer — your mic + Otto's TTS → the call's mic cable
   deepgram.ts    streaming STT (one per audio source)
   tts.ts         Aura TTS as raw PCM
   llm.ts         context-aware LLM with web search + notes recall
   wakeword.ts    wake-word detection + question extraction
   transcript.ts  disk-persisted transcript + notes archive reader
-  route.ts       system-output switching (SwitchAudioSource)
+  route.ts       system-output query (SwitchAudioSource) — used only to label .env
   devices.ts     audio device discovery (npm run devices)
   setup.ts       packaged one-time setup (npm run setup)
 scripts/
-  create-multi-output.swift   CoreAudio helper to create the monitor device
+  system-tap.swift           CoreAudio process tap → mono s16le on stdout
+  OttoTap-Info.plist         bundle Info.plist (TCC usage string + identity)
+  build-tap.sh               compiles + ad-hoc-signs bin/OttoTap.app
+  grant-tap.sh               one-time permission grant (npm run tap:grant)
+  teardown.sh                stop the tap + cleanup (npm run teardown)
+  destroy-aggregates.swift   removes any leftover private Otto audio devices
+  create-multi-output.swift  legacy helper (pre-tap Multi-Output device)
 ```
-
-A UI is planned (Phase 4) — for now it runs in the terminal with a live transcript.

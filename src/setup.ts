@@ -3,13 +3,16 @@
  *
  *   npm run setup
  *
- * - verifies ffmpeg / sox / brew
- * - installs switchaudio-osx (for output switching) if missing
- * - checks BlackHole 2ch + 16ch are installed (else tells you the brew command)
- * - creates the "Otto Monitor" multi-output device (your output + BlackHole 2ch)
- *   via a CoreAudio helper — falls back to printed Audio MIDI Setup steps
+ * - verifies ffmpeg (mic capture) / sox (Otto's voice playback) / brew
+ * - checks BlackHole 2ch is installed (the only virtual device Otto needs — it's
+ *   how Otto's voice is injected into the call's mic; else prints the brew command)
+ * - builds the system-audio tap bundle (bin/OttoTap.app) via scripts/build-tap.sh
  * - writes the detected device names into .env
- * - prints the single manual step: set your call app's mic to BlackHole 16ch
+ *
+ * Otto captures the call's audio with a CoreAudio process tap, so it NEVER changes
+ * your system output or any audio device — there is no Multi-Output device and no
+ * output switching. You keep hearing the call natively. The only manual steps are
+ * granting the tap permission once and pointing the call app's mic at BlackHole 2ch.
  */
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -54,84 +57,58 @@ async function main() {
   step("1. Tooling");
   for (const tool of ["ffmpeg", "sox"]) {
     if (await has(tool)) ok(tool);
-    else { warn(`${tool} missing — install with: brew install ${tool}`); }
+    else warn(`${tool} missing — install with: brew install ${tool}`);
   }
   const brew = await has("brew");
   brew ? ok("brew") : warn("Homebrew missing — install from https://brew.sh");
 
-  step("2. Output switching (switchaudio-osx)");
-  if (await has("SwitchAudioSource")) ok("SwitchAudioSource");
-  else if (brew) {
-    console.log("  installing switchaudio-osx…");
-    const r = await run("brew", ["install", "switchaudio-osx"]);
-    r.code === 0 ? ok("installed") : warn(`install failed: ${r.err.split("\n").slice(-1)[0]}`);
-  } else warn("install with: brew install switchaudio-osx");
-
-  step("3. BlackHole virtual devices");
+  step("2. BlackHole virtual mic (for injecting Otto's voice into the call)");
   const inputs = await listInputDevices();
   const names = inputs.map((d) => d.name);
   const has2 = names.some((n) => /blackhole 2ch/i.test(n));
-  const has16 = names.some((n) => /blackhole 16ch/i.test(n));
   has2 ? ok("BlackHole 2ch") : warn("BlackHole 2ch missing — brew install blackhole-2ch");
-  has16 ? ok("BlackHole 16ch") : warn("BlackHole 16ch missing — brew install blackhole-16ch");
 
-  const mic = names.find((n) => /microphone/i.test(n) && !/blackhole/i.test(n)) ?? names.find((n) => !/blackhole/i.test(n)) ?? "MacBook Air Microphone";
+  const mic =
+    names.find((n) => /microphone/i.test(n) && !/blackhole/i.test(n)) ??
+    names.find((n) => !/blackhole/i.test(n)) ??
+    "MacBook Air Microphone";
   ok(`your mic detected as: "${mic}"`);
 
-  step("4. Monitor device (so you hear the call while we capture it)");
-  const ROUTE_DEVICE = "Otto Monitor";
-  const currentOut = (await route.currentOutput()) ?? "MacBook Air Speakers";
-  const outs = await route.listOutputs();
-  if ((await has("swiftc")) && has16) {
-    // The helper destroys any prior "Otto Monitor" and rebuilds it around the
-    // CURRENT output device — so re-running setup after changing headphones works.
-    console.log(`  building "${ROUTE_DEVICE}" = [${currentOut} + BlackHole 16ch]…`);
-    const swift = resolve(process.cwd(), "scripts/create-multi-output.swift");
-    const bin = "/tmp/otto-mkdev";
-    const c = await run("swiftc", [swift, "-o", bin, "-framework", "CoreAudio"]);
-    if (c.code !== 0) {
-      warn(`compile failed: ${c.err.split("\n").slice(-1)[0]}`);
-      manualMonitorSteps(currentOut);
-    } else {
-      const r = await run(bin, [ROUTE_DEVICE, currentOut, "BlackHole 16ch"]);
-      r.code === 0 ? ok(`built "${ROUTE_DEVICE}" around ${currentOut}`) : (warn(`build failed: ${r.err}`), manualMonitorSteps(currentOut));
-    }
-  } else if (outs.includes(ROUTE_DEVICE)) {
-    ok(`"${ROUTE_DEVICE}" exists (install Xcode CLT to auto-rebuild it for a new output)`);
+  step("3. System-audio tap (captures the call without touching your audio devices)");
+  if (await has("swiftc")) {
+    const r = await run("bash", ["scripts/build-tap.sh"]);
+    r.code === 0 ? ok("built bin/OttoTap.app") : warn(`build failed: ${r.err.split("\n").slice(-1)[0]}`);
   } else {
-    warn(await has("swiftc") ? "BlackHole 16ch needed first" : "Xcode command-line tools (swiftc) not found");
-    manualMonitorSteps(currentOut);
+    warn("Xcode command-line tools (swiftc) not found — run: xcode-select --install, then: npm run build:tap");
   }
 
-  step("5. Writing .env");
+  step("4. Writing .env");
+  const currentOut = (await route.currentOutput()) ?? "MacBook Air Speakers";
   updateEnv({
     MIC_DEVICE: mic,
-    CALL_CAPTURE_DEVICE: "BlackHole 16ch",
     CALL_MIC_DEVICE: "BlackHole 2ch",
-    MONITOR_DEVICE: currentOut,
-    ROUTE_DEVICE,
+    MONITOR_DEVICE: currentOut, // where Otto's spoken replies are played back to you
   });
   ok("device config saved to .env");
 
   console.log(`
-Done. To use Otto on a call:
+Done. Two one-time steps, then you're live:
 
-  1. In your call app (Zoom/Meet/Teams), set the MICROPHONE to:  BlackHole 2ch
-  2. Use HEADPHONES (so Otto's voice isn't echoed back into the call).
-  3. Start the agent:  npm run dev
-     (it routes your system output through "${ROUTE_DEVICE}" automatically, and restores it on exit)
+  1. Grant the tap permission:  npm run tap:grant
+     (click "Allow" on the macOS dialog — this lets Otto hear the call)
+  2. In your call app (Zoom/Meet/Teams), set the MICROPHONE to:  BlackHole 2ch
+     (this is how Otto's voice reaches everyone on the call)
 
-Then anyone on the call can say "Otto, …" and everyone will hear the reply.
+Then:
+
+  • Use HEADPHONES (so Otto's spoken replies aren't echoed back into the call).
+  • Start the agent:  npm run dev
+
+Your system output is never changed — you keep hearing the call exactly as normal.
+Anyone on the call can say "Otto, …" and everyone will hear the reply.
+
+To remove everything later:  npm run teardown
 `);
-}
-
-function manualMonitorSteps(currentOut: string): void {
-  console.log(`
-  → Create it manually (one time) in Audio MIDI Setup:
-      • Open "Audio MIDI Setup"  (Applications ▸ Utilities)
-      • Click  +  (bottom-left) ▸ "Create Multi-Output Device"
-      • Tick:  ${currentOut}  AND  BlackHole 16ch
-      • Rename it to:  Otto Monitor`);
 }
 
 void main();
