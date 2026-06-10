@@ -82,8 +82,12 @@ function interrupt(): void {
   currentPlayback?.stop();
 }
 
-function toggleMute(): void {
-  micMuted = !micMuted;
+function setMute(muted: boolean): void {
+  if (muted === micMuted) {
+    ui.emit({ type: "muted", muted: micMuted }); // re-sync the UI even if unchanged
+    return;
+  }
+  micMuted = muted;
   ui.emit({ type: "muted", muted: micMuted });
   console.log(micMuted ? "🔇 mic muted" : "🔈 mic unmuted");
 }
@@ -124,7 +128,7 @@ function endSession(): void {
 const ui = startUI(
   UI_PORT,
   { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: ROUTE_DEVICE },
-  { notesDir: NOTES_DIR, onStart: startSession, onEnd: endSession, onMute: toggleMute, onSummarize: summarizeMeeting },
+  { notesDir: NOTES_DIR, onStart: startSession, onEnd: endSession, onMute: setMute, onSummarize: summarizeMeeting },
 );
 
 async function answer(question: string): Promise<void> {

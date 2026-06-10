@@ -26,7 +26,7 @@ export interface UIHandlers {
   notesDir?: string;
   onStart?: () => void;
   onEnd?: () => void;
-  onMute?: () => void; // toggle your mic
+  onMute?: (muted: boolean) => void; // set mic muted state (explicit, not a toggle)
   /** Produce a Markdown summary for a transcript (LLM lives in the agent). */
   onSummarize?: (transcript: string) => Promise<string>;
 }
@@ -113,7 +113,7 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
       return json(res, 200, { ok: true });
     }
     if (req.method === "POST" && path === "/control/mute") {
-      handlers.onMute?.();
+      handlers.onMute?.(url.searchParams.get("on") === "true"); // explicit desired state
       return json(res, 200, { ok: true });
     }
     if (path === "/sessions") {

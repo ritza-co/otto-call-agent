@@ -282,7 +282,7 @@
         const eBtn = $("endBtn");
         if (eBtn) eBtn.onclick = endStartToggle;
         const mBtn = $("muteBtn");
-        if (mBtn) mBtn.onclick = () => fetch("/control/mute", { method: "POST" }).catch(() => {});
+        if (mBtn) mBtn.onclick = () => fetch("/control/mute?on=" + (!muted), { method: "POST" }).catch(() => {});
       }
 
       async function summarize(id, btn) {
