@@ -150,23 +150,50 @@ export function playPCMControllable(deviceName: string, pcm: Buffer, format: Pcm
  * call-mic cable continuously (Phase 2 mixer writes mic + TTS here).
  */
 export class PcmSink {
-  private proc: ChildProcess;
+  private proc!: ChildProcess;
+  private readonly args: string[];
+  private readonly stallBytes: number;
+  private stopped = false;
 
   constructor(deviceName: string, format: PcmFormat) {
     const inArgs = ["-t", "raw", "-r", String(format.sampleRate), "-e", "signed", "-b", "16", "-c", String(format.channels), "-"];
     const outArgs = isDefaultDevice(deviceName) ? ["-d"] : ["-t", "coreaudio", deviceName];
-    this.proc = spawn("sox", [...inArgs, ...outArgs]);
+    this.args = [...inArgs, ...outArgs];
+    this.stallBytes = format.sampleRate * format.channels * 2; // ~1s of audio backed up = stalled
+    this.spawn();
+  }
+
+  // sox plays CoreAudio output in real time. Two failure modes make the cable go
+  // silent on a long call: (a) sox exits (underrun/EPIPE) — caught by the close
+  // handler; (b) sox stays alive but its CoreAudio stream is invalidated (e.g. the
+  // device format is renegotiated when another app opens/closes it), so it keeps
+  // draining stdin while outputting nothing. (b) is caught by restart() — either
+  // from backpressure (if it also stops draining) or an explicit restart() on
+  // unmute. Either way the sink self-heals instead of dying for good.
+  private spawn(): void {
+    this.proc = spawn("sox", this.args);
     this.proc.on("error", () => {});
-    // Continuously fed in real time by the mic; ignore EPIPE if sox ever exits.
-    this.proc.stdin?.on("error", () => {});
+    this.proc.stdin?.on("error", () => {}); // ignore EPIPE on a dying pipe
+    this.proc.on("close", () => {
+      if (!this.stopped) setTimeout(() => { if (!this.stopped) this.spawn(); }, 150);
+    });
+  }
+
+  /** Kill + respawn sox (the close handler brings it back). */
+  restart(): void {
+    if (this.stopped) return;
+    try { this.proc.kill("SIGKILL"); } catch { /* already gone */ }
   }
 
   write(pcm: Buffer): void {
     const s = this.proc.stdin;
-    if (s && s.writable) s.write(pcm);
+    if (!s || !s.writable) return;
+    if (s.writableLength > this.stallBytes) { this.restart(); return; } // sox stopped draining → stalled
+    s.write(pcm);
   }
 
   stop(): void {
+    this.stopped = true;
     this.proc.stdin?.end();
     this.proc.kill("SIGKILL");
   }

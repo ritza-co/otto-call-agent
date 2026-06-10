@@ -83,6 +83,10 @@ function setMute(muted: boolean): void {
   micMuted = muted;
   ui.emit({ type: "muted", muted: micMuted });
   console.log(micMuted ? "🔇 mic muted" : "🔈 mic unmuted");
+  // The call-mic sox stream can be silently invalidated across a mute (the call
+  // app may renegotiate BlackHole's format). Recreate it on unmute so your voice
+  // reliably reaches the call again.
+  if (!micMuted) mixer.restartSink();
 }
 
 function startSession(): void {

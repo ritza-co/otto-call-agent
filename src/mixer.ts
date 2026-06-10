@@ -73,6 +73,11 @@ export class CallMixer {
     this.speaking = false;
   }
 
+  /** Recreate the cable sink (recovers a sox stream that went silent mid-call). */
+  restartSink(): void {
+    this.sink.restart();
+  }
+
   stop(): void {
     this.sink.stop();
   }
