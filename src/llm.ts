@@ -154,9 +154,8 @@ class AnthropicProvider implements LLMProvider {
 }
 
 /**
- * Standalone web search via OpenAI's Responses API web_search tool. Used as the
- * handler for the Voice Agent's `web_search` function call. Returns clean,
- * speakable text (no URLs/citations).
+ * Standalone web search via OpenAI's Responses API web_search tool. Returns
+ * clean, speakable text (no URLs/citations).
  */
 let openaiClient: any = null;
 export async function searchWeb(query: string): Promise<string> {

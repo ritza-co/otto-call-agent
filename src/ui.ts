@@ -182,25 +182,3 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
     },
   };
 }
-
-// --- demo mode -------------------------------------------------------------
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const port = Number(process.env.UI_PORT || 4848);
-  const ui = startUI(port, { agentName: "Otto", callMic: "BlackHole 2ch", monitor: "Otto Monitor" }, { notesDir: resolve(process.cwd(), "notes") });
-  console.log(`UI demo → ${ui.url}`);
-  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  void (async () => {
-    for (;;) {
-      ui.emit({ type: "state", state: "listening" });
-      ui.emit({ type: "line", kind: "speech", speaker: "You", text: "Otto, what's the USD to EUR rate right now?" });
-      await wait(900);
-      ui.emit({ type: "state", state: "thinking" });
-      await wait(1600);
-      ui.emit({ type: "line", kind: "agent", speaker: "Otto", text: "It's about 1.08 dollars per euro.", searched: true, sources: ["xe.com"] });
-      ui.emit({ type: "state", state: "speaking" });
-      await wait(2600);
-      ui.emit({ type: "state", state: "listening" });
-      await wait(3000);
-    }
-  })();
-}
