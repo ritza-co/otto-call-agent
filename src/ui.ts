@@ -120,7 +120,10 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
       return json(res, 200, { ok: true });
     }
     if (path === "/devices") {
-      const devices = await handlers.listDevices?.() ?? [];
+      const all = await handlers.listDevices?.() ?? [];
+      // Exclude the call-mic passthrough device — it's an output cable, not a real input.
+      const callMicLower = meta.callMic.toLowerCase();
+      const devices = all.filter((d) => d.name.toLowerCase() !== callMicLower);
       return json(res, 200, devices);
     }
     if (req.method === "POST" && path === "/control/mic") {

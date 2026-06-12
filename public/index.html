@@ -181,7 +181,6 @@
       let muted = false;          // your mic muted into Otto + the call
       let liveSummary = null;     // summary text for the current live session, set after summarize
       let activeMicDevice = "";
-      let callMicDevice = "";
 
       const esc = (s) => (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
       const mdInline = (s) => s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
@@ -266,15 +265,11 @@
           : `<span class="status"><span class="s-dot"></span>session ended</span>`;
         const meta = `${statusPill}<span>say "${esc(agentName)}, …" to ask</span>`;
         const header = headerHtml("Live meeting", meta, { id: active ? currentId : currentId, live: active, hasSummary: m && m.hasSummary });
-        const isBlackHole = callMicDevice.toLowerCase().includes("blackhole");
         const muteBanner = muted ? `<div class="mute-banner">
           <div class="mute-banner-icon">🔇</div>
           <div class="mute-banner-body">
             <div class="mute-banner-title">You are muted</div>
-            <div class="mute-banner-sub">${isBlackHole
-              ? esc(agentName) + " cannot hear you &mdash; and neither can your call (mic is BlackHole 2ch)"
-              : esc(agentName) + " cannot hear or transcribe you"
-            }</div>
+            <div class="mute-banner-sub">${esc(agentName)} cannot hear you &mdash; and neither can your call participants</div>
           </div>
           <button class="mute-banner-btn" id="unmuteBannerBtn">Unmute</button>
         </div>` : "";
@@ -384,7 +379,6 @@
       function handle(ev) {
         if (ev.type === "meta") {
           agentName = ev.agentName || agentName;
-          if (ev.callMic) callMicDevice = ev.callMic;
           if (ev.activeMic && ev.activeMic !== activeMicDevice) { activeMicDevice = ev.activeMic; micSelect.value = activeMicDevice; }
           if (viewingLive()) renderMain();
         }
