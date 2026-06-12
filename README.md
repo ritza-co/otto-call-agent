@@ -7,6 +7,12 @@ call can use it while you're connected.
 
 ![Otto's dashboard during a live call: a diarized transcript with a spoken answer from Otto](docs/dashboard.png)
 
+> **⚠️ Privacy & Legal Notice**
+>
+> While Otto is running, it continuously captures all audio playing on your device — including your microphone and the full call — and streams it to **Deepgram** (speech-to-text) and **OpenAI** (or Anthropic) for processing. This means **everything said by you and every other participant** is transmitted to third-party cloud services.
+>
+> Before running Otto, make sure you have the legal right to record all participants. Recording laws vary by jurisdiction — many require the consent of all parties on a call. It is your responsibility to inform participants that the call is being recorded and processed by third-party AI services. Do not use Otto in contexts where recording is prohibited or where you cannot obtain the necessary consent.
+
 ## What It Does
 
 - **Listens** to the call and your mic with Deepgram streaming speech-to-text, diarized so each speaker is labeled, and saves a transcript per meeting.
