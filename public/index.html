@@ -164,6 +164,7 @@
       let liveLines = [];         // {kind,speaker,text,searched,sources}
       let interimText = "";
       let muted = false;          // your mic muted into Otto + the call
+      let liveSummary = null;     // summary text for the current live session, set after summarize
 
       const esc = (s) => (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
       const mdInline = (s) => s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
@@ -247,12 +248,18 @@
           ? `<span class="status" data-state="${ottoState}"><span class="s-dot"></span>${agentName} · ${ottoState}</span>`
           : `<span class="status"><span class="s-dot"></span>session ended</span>`;
         const mutedChip = muted ? `<span class="muted-chip">🔇 you're muted</span>` : "";
-        const meta = `${statusPill}${mutedChip}<span>say “${esc(agentName)}, …” to ask</span>`;
+        const meta = `${statusPill}${mutedChip}<span>say "${esc(agentName)}, …" to ask</span>`;
         const header = headerHtml("Live meeting", meta, { id: active ? currentId : currentId, live: active, hasSummary: m && m.hasSummary });
         let body = liveLines.map((l) => transcriptRow(l.speaker, l.text, l.searched, l.sources, false)).join("");
         if (interimText) body += transcriptRow(agentName === "" ? "" : "…", interimText, false, null, true);
-        if (!body) body = '<div class="empty">Listening… start talking, or say “' + esc(agentName) + ', …”.</div>';
-        record.innerHTML = header + `<div class="section"><div class="section-h">Transcript</div><div class="card transcript" id="liveFeed">${body}</div></div>`;
+        if (!body) body = '<div class="empty">Listening… start talking, or say "' + esc(agentName) + ', …".</div>';
+        const summaryHtml = liveSummary
+          ? `<div class="card summary-card"><div class="summary-body">${renderSummary(liveSummary)}</div></div>`
+          : `<div class="card summary-card"><div class="summary-empty">No summary yet. Generate one with <strong>Summarize meeting</strong>.</div></div>`;
+        record.innerHTML =
+          header +
+          `<div class="section"><div class="section-h">Summary</div>${summaryHtml}</div>` +
+          `<div class="section"><div class="section-h">Transcript</div><div class="card transcript" id="liveFeed">${body}</div></div>`;
         wireHeader(active ? currentId : currentId);
         const feed = $("liveFeed"); if (feed) feed.scrollTop = feed.scrollHeight;
       }
@@ -292,8 +299,17 @@
           const r = await (await fetch("/summarize?id=" + encodeURIComponent(id), { method: "POST" })).json();
           if (r.summary) {
             toast("Summary ready");
+            btn.textContent = "Re-summarize"; btn.disabled = false;
+            if (viewingLive()) {
+              // Update summary in-place so the live transcript feed isn’t disrupted
+              liveSummary = r.summary;
+              const card = document.querySelector(".summary-card");
+              if (card) card.innerHTML = `<div class="summary-body">${renderSummary(r.summary)}</div>`;
+              else renderLive(); // summary card missing (first load) — rebuild the view
+            } else {
+              renderRecord(id);
+            }
             await refreshList();
-            if (viewingLive()) renderLive(); else renderRecord(id);
           } else { toast("Couldn’t summarize"); btn.disabled = false; btn.textContent = label; }
         } catch { toast("Couldn’t summarize"); btn.disabled = false; btn.textContent = label; }
       }
@@ -319,7 +335,7 @@
         } else if (ev.type === "muted") {
           muted = ev.muted; if (viewingLive()) renderLive();
         } else if (ev.type === "reset") {
-          liveLines = []; interimText = ""; if (viewingLive()) renderLive();
+          liveLines = []; interimText = ""; liveSummary = null; if (viewingLive()) renderLive();
         } else if (ev.type === "state") {
           ottoState = ev.state; const st = document.querySelector(".status"); if (st && viewingLive()) { st.dataset.state = ev.state; st.lastChild.textContent = `${agentName} · ${ev.state}`; }
         } else if (ev.type === "line") {

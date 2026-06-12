@@ -69,6 +69,14 @@ let awaitingSince = 0;
 let lastLine: { text: string; at: number } | null = null;
 let micMuted = false; // your mic muted into both Otto (recording) and the call
 let ottoSpeaking = false; // gate: don't transcribe the call while Otto's own TTS is playing out
+// Your mic audio leaks into the system-audio tap via the mixer/BlackHole routing, so both
+// micStt and callStt would transcribe your voice. We gate callStt at the audio level: while
+// your mic is loud we suppress call audio from reaching callStt, plus a short tail after you
+// stop speaking so in-flight Deepgram frames are also blocked.
+let micActiveSince = 0; // epoch ms of the most recent mic-speech frame
+// Much lower than BARGE_RMS — we want to catch normal/quiet speech, not just loud interruptions.
+const MIC_GATE_RMS = Number(process.env.MIC_GATE_RMS || 0.008);
+const MIC_GATE_TAIL_MS = 1200; // generous tail covers BlackHole buffering delay
 
 function interrupt(): void {
   mixer.cancel();
@@ -168,16 +176,25 @@ async function answer(question: string): Promise<void> {
     console.error("LLM failed:", err);
   } finally {
     answering = false;
+    // Discard stale stitch state so mic echo from Otto's TTS doesn't get picked up
+    // as a question by the next wake-word trigger.
+    lastLine = null;
+    awaitingQuestion = false;
     if (sessionActive) ui.emit({ type: "state", state: "listening" });
   }
 }
 
 function handleUtterance(speaker: string, text: string): void {
-  if (!sessionActive || !transcript || answering) return;
+  if (!sessionActive || !transcript) return;
 
   transcript.add(speaker, text);
   console.log(`${speaker}: ${text}`);
   ui.emit({ type: "line", kind: "speech", speaker, text });
+
+  // Record utterance to transcript even while answering, but don't trigger a new
+  // answer mid-response — the finally block in answer() clears stitch state so the
+  // next wake-word call starts fresh.
+  if (answering) return;
 
   const now = Date.now();
   const directQuestion = wake.extract(text);
@@ -226,7 +243,7 @@ async function main() {
   });
   callSampleRate = sysCap.sampleRate;
   sysCap.onData((c) => {
-    if (sessionActive && !ottoSpeaking) callStt?.send(c);
+    if (sessionActive && !ottoSpeaking && Date.now() - micActiveSince > MIC_GATE_TAIL_MS) callStt?.send(c);
   });
   console.log(`🎧 system-audio tap live (${callSampleRate} Hz) — your output device is unchanged`);
 
@@ -242,6 +259,7 @@ async function main() {
         return;
       }
       mixer.pushMic(stereo); // your voice → the call (always, so you're heard)
+      if (rms16(stereo) > MIC_GATE_RMS) micActiveSince = Date.now(); // gate callStt while you're speaking
       if (sessionActive) micStt?.send(stereoToMono(stereo)); // transcribe only while listening
 
       if (sessionActive && BARGE_IN && mixer.speaking) {

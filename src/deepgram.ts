@@ -62,8 +62,8 @@ export function openSTT(opts: STTOptions, cb: STTCallbacks): STTConnection {
       // How long Otto waits after you stop talking before finalizing → biggest
       // lever on perceived response speed. 400ms is snappy but still tolerant of
       // brief pauses (the wake-word stitcher covers any over-eager splits).
-      endpointing: 400,
-      utterance_end_ms: 1000,
+      endpointing: 700,
+      utterance_end_ms: 1500,
       vad_events: true,
       encoding: "linear16",
       sample_rate: opts.sampleRate,
