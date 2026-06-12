@@ -13,12 +13,13 @@ import { basename, resolve } from "node:path";
 import dotenv from "dotenv";
 dotenv.config();
 
-import { capture, playPCMControllable, rms16, stereoToMono, type Playback } from "./audio.js";
+import { capture, playPCMControllable, rms16, stereoToMono, type Playback, type CaptureHandle } from "./audio.js";
 import { CallMixer } from "./mixer.js";
 import { createSystemAudioCapture } from "./capture/index.js";
 import { openSTT, type STTConnection } from "./deepgram.js";
 import { WakeWord } from "./wakeword.js";
 import { createLLM, summarizeMeeting } from "./llm.js";
+import { listInputDevices } from "./devices.js";
 import { synthesize, TTS_SAMPLE_RATE } from "./tts.js";
 import { TranscriptStore } from "./transcript.js";
 import { startUI } from "./ui.js";
@@ -57,6 +58,8 @@ const BARGE_RMS = Number(process.env.BARGE_RMS || 0.05);
 
 let currentPlayback: Playback | null = null;
 let loudFrames = 0;
+let micCap: CaptureHandle | null = null;
+let activeMicDevice = MIC_DEVICE;
 
 // --- session state (controlled from the dashboard) ---
 let sessionActive = false;
@@ -97,6 +100,28 @@ function setMute(muted: boolean): void {
   if (!micMuted) mixer.restartSink();
 }
 
+async function switchMic(device: string): Promise<void> {
+  const old = micCap;
+  micCap = await capture(
+    device,
+    MIC_FMT,
+    (stereo) => {
+      if (micMuted) { mixer.pushMic(Buffer.alloc(stereo.length)); loudFrames = 0; return; }
+      mixer.pushMic(stereo);
+      if (rms16(stereo) > MIC_GATE_RMS) micActiveSince = Date.now();
+      if (sessionActive) micStt?.send(stereoToMono(stereo));
+      if (sessionActive && BARGE_IN && mixer.speaking) {
+        if (rms16(stereo) > BARGE_RMS) { if (++loudFrames >= 3) { console.log(`${AGENT_NAME} ⏹  (interrupted)`); interrupt(); loudFrames = 0; } }
+        else loudFrames = 0;
+      } else loudFrames = 0;
+    },
+    (e) => console.error("mic capture:", e),
+  );
+  old?.stop();
+  activeMicDevice = device;
+  console.log(`🎙️  mic switched → ${device}`);
+}
+
 function startSession(): void {
   if (sessionActive) return;
   transcript = new TranscriptStore(NOTES_DIR, new Date().toISOString());
@@ -132,8 +157,16 @@ function endSession(): void {
 
 const ui = startUI(
   UI_PORT,
-  { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: MONITOR_DEVICE },
-  { notesDir: NOTES_DIR, onStart: startSession, onEnd: endSession, onMute: setMute, onSummarize: summarizeMeeting },
+  { agentName: AGENT_NAME, callMic: CALL_MIC_DEVICE, monitor: MONITOR_DEVICE, activeMic: MIC_DEVICE },
+  {
+    notesDir: NOTES_DIR,
+    onStart: startSession,
+    onEnd: endSession,
+    onMute: setMute,
+    onMicSwitch: switchMic,
+    onSummarize: summarizeMeeting,
+    listDevices: listInputDevices,
+  },
 );
 
 async function answer(question: string): Promise<void> {
@@ -247,7 +280,7 @@ async function main() {
   });
   console.log(`🎧 system-audio tap live (${callSampleRate} Hz) — your output device is unchanged`);
 
-  const micCap = await capture(
+  micCap = await capture(
     MIC_DEVICE,
     MIC_FMT,
     (stereo) => {
@@ -293,7 +326,7 @@ async function main() {
     stopped = true;
     endSession();
     sysCap.stop();
-    micCap.stop();
+    micCap?.stop();
     mixer.stop();
     console.log(`\nStopped. Transcripts in ${NOTES_DIR}`);
     process.exit(0);

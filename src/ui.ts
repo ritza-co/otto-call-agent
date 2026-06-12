@@ -1,12 +1,14 @@
 /**
  * Local UI server. Serves a single static page, pushes live events over SSE, and
  * exposes a small control + history API:
- *   GET  /events            live event stream (SSE)
- *   POST /control/start     start a session (agent listens)
- *   POST /control/end       end the session (agent stops listening)
- *   GET  /sessions          list saved session transcripts
- *   GET  /session?id=FILE   one transcript's markdown (for viewing)
- *   GET  /download?id=FILE  one transcript as a downloadable .md
+ *   GET  /events               live event stream (SSE)
+ *   POST /control/start        start a session (agent listens)
+ *   POST /control/end          end the session (agent stops listening)
+ *   GET  /devices              list available audio input devices
+ *   POST /control/mic?device=  hot-switch the mic input device
+ *   GET  /sessions             list saved session transcripts
+ *   GET  /session?id=FILE      one transcript's markdown (for viewing)
+ *   GET  /download?id=FILE     one transcript as a downloadable .md
  */
 import { createServer, type ServerResponse } from "node:http";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -15,7 +17,7 @@ import { basename, join, resolve } from "node:path";
 export type AgentState = "listening" | "thinking" | "speaking";
 
 export type UiEvent =
-  | { type: "meta"; agentName: string; callMic: string; monitor: string }
+  | { type: "meta"; agentName: string; callMic: string; monitor: string; activeMic?: string }
   | { type: "state"; state: AgentState }
   | { type: "session"; active: boolean; id?: string } // session started/ended
   | { type: "muted"; muted: boolean } // your mic muted into Otto + the call
@@ -26,9 +28,10 @@ export interface UIHandlers {
   notesDir?: string;
   onStart?: () => void;
   onEnd?: () => void;
-  onMute?: (muted: boolean) => void; // set mic muted state (explicit, not a toggle)
-  /** Produce a Markdown summary for a transcript (LLM lives in the agent). */
+  onMute?: (muted: boolean) => void;
+  onMicSwitch?: (device: string) => Promise<void>;
   onSummarize?: (transcript: string) => Promise<string>;
+  listDevices?: () => Promise<{ index: number; name: string }[]>;
 }
 
 export interface UI {
@@ -79,7 +82,7 @@ function readSummary(notesDir: string, id: string): string | null {
   return existsSync(p) ? readFileSync(p, "utf8") : null;
 }
 
-export function startUI(port: number, meta: { agentName: string; callMic: string; monitor: string }, handlers: UIHandlers = {}): UI {
+export function startUI(port: number, meta: { agentName: string; callMic: string; monitor: string; activeMic?: string }, handlers: UIHandlers = {}): UI {
   const indexPath = resolve(process.cwd(), "public/index.html");
   const notesDir = handlers.notesDir ? resolve(handlers.notesDir) : "";
   const clients = new Set<ServerResponse>();
@@ -93,7 +96,7 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
     res.end(JSON.stringify(body));
   };
 
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
     const path = url.pathname;
 
@@ -113,8 +116,20 @@ export function startUI(port: number, meta: { agentName: string; callMic: string
       return json(res, 200, { ok: true });
     }
     if (req.method === "POST" && path === "/control/mute") {
-      handlers.onMute?.(url.searchParams.get("on") === "true"); // explicit desired state
+      handlers.onMute?.(url.searchParams.get("on") === "true");
       return json(res, 200, { ok: true });
+    }
+    if (path === "/devices") {
+      const devices = await handlers.listDevices?.() ?? [];
+      return json(res, 200, devices);
+    }
+    if (req.method === "POST" && path === "/control/mic") {
+      const device = url.searchParams.get("device") ?? "";
+      if (!device || !handlers.onMicSwitch) return json(res, 400, { error: "missing device" });
+      handlers.onMicSwitch(device)
+        .then(() => json(res, 200, { ok: true, device }))
+        .catch((e) => json(res, 500, { error: String(e?.message || e) }));
+      return;
     }
     if (path === "/sessions") {
       return json(res, 200, listSessions(notesDir));

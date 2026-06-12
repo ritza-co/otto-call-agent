@@ -56,6 +56,10 @@
       .session-btn .rec { width: 8px; height: 8px; border-radius: 50%; background: #fff; }
       .session-btn[data-active="false"] .rec { background: var(--accent); }
 
+      .mic-row { padding: 0 16px 12px; display: flex; align-items: center; gap: 8px; }
+      .mic-label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; white-space: nowrap; }
+      .mic-select { flex: 1; font-family: var(--sans); font-size: 12px; color: var(--ink); background: var(--paper); border: 1px solid var(--faint); border-radius: 7px; padding: 5px 8px; cursor: pointer; min-width: 0; }
+      .mic-select:focus { outline: none; border-color: var(--accent); }
       .search { padding: 0 16px 12px; }
       .search input {
         width: 100%; font-family: var(--sans); font-size: 13px; color: var(--ink);
@@ -143,6 +147,10 @@
         <div class="session-row">
           <button class="session-btn" id="sessionBtn" data-active="true"><span class="rec"></span> End session</button>
         </div>
+        <div class="mic-row">
+          <label class="mic-label">Mic</label>
+          <select id="micSelect" class="mic-select"></select>
+        </div>
         <div class="search"><input id="search" type="search" placeholder="Search meetings…" /></div>
         <div class="list-label">Meetings</div>
         <div class="meeting-list" id="meetingList"></div>
@@ -153,7 +161,7 @@
 
     <script>
       const $ = (id) => document.getElementById(id);
-      const meetingList = $("meetingList"), record = $("record"), sessionBtn = $("sessionBtn"), searchInput = $("search"), toastEl = $("toast");
+      const meetingList = $("meetingList"), record = $("record"), sessionBtn = $("sessionBtn"), searchInput = $("search"), toastEl = $("toast"), micSelect = $("micSelect");
 
       let agentName = "Otto";
       let meetings = [];          // from /sessions
@@ -165,6 +173,7 @@
       let interimText = "";
       let muted = false;          // your mic muted into Otto + the call
       let liveSummary = null;     // summary text for the current live session, set after summarize
+      let activeMicDevice = "";
 
       const esc = (s) => (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
       const mdInline = (s) => s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
@@ -323,9 +332,39 @@
       sessionBtn.onclick = endStartToggle;
       searchInput.oninput = renderList;
 
+      // ---------- mic switcher ----------
+      async function loadMicDevices() {
+        try {
+          const devices = await (await fetch("/devices")).json();
+          micSelect.innerHTML = "";
+          for (const d of devices) {
+            const opt = document.createElement("option");
+            opt.value = d.name;
+            opt.textContent = d.name;
+            micSelect.appendChild(opt);
+          }
+          // Mark the current active device (server sends it in meta event)
+          if (activeMicDevice) micSelect.value = activeMicDevice;
+        } catch {}
+      }
+      micSelect.onchange = async () => {
+        const device = micSelect.value;
+        micSelect.disabled = true;
+        try {
+          const r = await (await fetch("/control/mic?device=" + encodeURIComponent(device), { method: "POST" })).json();
+          if (r.ok) { toast("Mic: " + device); activeMicDevice = device; }
+          else { toast("Couldn't switch mic"); micSelect.value = activeMicDevice; }
+        } catch { toast("Couldn't switch mic"); micSelect.value = activeMicDevice; }
+        micSelect.disabled = false;
+      };
+
       // ---------- live event stream ----------
       function handle(ev) {
-        if (ev.type === "meta") { agentName = ev.agentName || agentName; if (viewingLive()) renderMain(); }
+        if (ev.type === "meta") {
+          agentName = ev.agentName || agentName;
+          if (ev.activeMic && ev.activeMic !== activeMicDevice) { activeMicDevice = ev.activeMic; micSelect.value = activeMicDevice; }
+          if (viewingLive()) renderMain();
+        }
         else if (ev.type === "session") {
           active = ev.active; if (ev.id) currentId = ev.id;
           sessionBtn.textContent = active ? "End session" : "Start session";
@@ -378,6 +417,7 @@
         const openId = params.get("open"); // deep-link to a specific meeting record
         if (openId) selectedId = openId;
         refreshList().then(() => renderMain());
+        loadMicDevices();
         const es = new EventSource("/events");
         es.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch {} };
       }
