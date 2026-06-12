@@ -121,6 +121,16 @@ Deepgram does the real-time listening and speaking:
 - **Endpointing:** tuned so Otto responds quickly after you finish a sentence without cutting you off.
 - **Aura text-to-speech:** synthesizes Otto's replies in a natural voice, streamed straight into the call.
 
+## Muting
+
+The **Mute** button in the live dashboard silences your microphone at the source — Otto stops hearing and transcribing you, and silence is fed into BlackHole 2ch instead of your voice.
+
+Because BlackHole 2ch is also the call app's microphone, this means **the call can't hear you either** while you're muted — a single button mutes you for both Otto and every other participant on the call. When you unmute, your voice resumes flowing into the call normally.
+
+> **When muted**, the dashboard shows a prominent red banner so it's impossible to miss. The banner also tells you exactly what's silenced (Otto and your call), so there are no surprises before you start talking again.
+
+If your `MIC_DEVICE` is set to a physical microphone rather than BlackHole 2ch, mute only silences Otto — your call app's mic routing is independent and unaffected.
+
 ## Configuration (`.env`)
 
 | Variable | Notes |

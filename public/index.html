@@ -103,6 +103,13 @@
       .btn.muted { background: #b3422f; border-color: #b3422f; color: #fff; }
       .btn.muted:hover { background: #9a3727; border-color: #9a3727; color: #fff; }
       .muted-chip { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; color: #b3422f; }
+      .mute-banner { display: flex; align-items: center; gap: 14px; background: #3d1a12; border: 1.5px solid #b3422f; border-radius: 10px; padding: 14px 20px; margin-top: 18px; }
+      .mute-banner-icon { font-size: 22px; flex: 0 0 auto; }
+      .mute-banner-body { flex: 1; }
+      .mute-banner-title { font-family: var(--sans); font-size: 14px; font-weight: 700; color: #f07a68; letter-spacing: 0.01em; }
+      .mute-banner-sub { font-family: var(--mono); font-size: 11.5px; color: #c97a6e; margin-top: 3px; letter-spacing: 0.02em; }
+      .mute-banner-btn { font-family: var(--sans); font-size: 12px; font-weight: 700; background: #b3422f; border: 1px solid #c95441; color: #fff; border-radius: 7px; padding: 7px 14px; cursor: pointer; white-space: nowrap; transition: background 0.15s; }
+      .mute-banner-btn:hover { background: #9a3727; }
 
       .section { margin-top: 26px; }
       .section-h { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); margin-bottom: 12px; }
@@ -174,6 +181,7 @@
       let muted = false;          // your mic muted into Otto + the call
       let liveSummary = null;     // summary text for the current live session, set after summarize
       let activeMicDevice = "";
+      let callMicDevice = "";
 
       const esc = (s) => (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
       const mdInline = (s) => s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
@@ -256,9 +264,20 @@
         const statusPill = active
           ? `<span class="status" data-state="${ottoState}"><span class="s-dot"></span>${agentName} · ${ottoState}</span>`
           : `<span class="status"><span class="s-dot"></span>session ended</span>`;
-        const mutedChip = muted ? `<span class="muted-chip">🔇 you're muted</span>` : "";
-        const meta = `${statusPill}${mutedChip}<span>say "${esc(agentName)}, …" to ask</span>`;
+        const meta = `${statusPill}<span>say "${esc(agentName)}, …" to ask</span>`;
         const header = headerHtml("Live meeting", meta, { id: active ? currentId : currentId, live: active, hasSummary: m && m.hasSummary });
+        const isBlackHole = callMicDevice.toLowerCase().includes("blackhole");
+        const muteBanner = muted ? `<div class="mute-banner">
+          <div class="mute-banner-icon">🔇</div>
+          <div class="mute-banner-body">
+            <div class="mute-banner-title">You are muted</div>
+            <div class="mute-banner-sub">${isBlackHole
+              ? esc(agentName) + " cannot hear you &mdash; and neither can your call (mic is BlackHole 2ch)"
+              : esc(agentName) + " cannot hear or transcribe you"
+            }</div>
+          </div>
+          <button class="mute-banner-btn" id="unmuteBannerBtn">Unmute</button>
+        </div>` : "";
         let body = liveLines.map((l) => transcriptRow(l.speaker, l.text, l.searched, l.sources, false)).join("");
         if (interimText) body += transcriptRow(agentName === "" ? "" : "…", interimText, false, null, true);
         if (!body) body = '<div class="empty">Listening… start talking, or say "' + esc(agentName) + ', …".</div>';
@@ -267,6 +286,7 @@
           : `<div class="card summary-card"><div class="summary-empty">No summary yet. Generate one with <strong>Summarize meeting</strong>.</div></div>`;
         record.innerHTML =
           header +
+          muteBanner +
           `<div class="section"><div class="section-h">Summary</div>${summaryHtml}</div>` +
           `<div class="section"><div class="section-h">Transcript</div><div class="card transcript" id="liveFeed">${body}</div></div>`;
         wireHeader(active ? currentId : currentId);
@@ -299,6 +319,8 @@
         if (eBtn) eBtn.onclick = endStartToggle;
         const mBtn = $("muteBtn");
         if (mBtn) mBtn.onclick = () => fetch("/control/mute?on=" + (!muted), { method: "POST" }).catch(() => {});
+        const uBtn = $("unmuteBannerBtn");
+        if (uBtn) uBtn.onclick = () => fetch("/control/mute?on=false", { method: "POST" }).catch(() => {});
       }
 
       async function summarize(id, btn) {
@@ -362,6 +384,7 @@
       function handle(ev) {
         if (ev.type === "meta") {
           agentName = ev.agentName || agentName;
+          if (ev.callMic) callMicDevice = ev.callMic;
           if (ev.activeMic && ev.activeMic !== activeMicDevice) { activeMicDevice = ev.activeMic; micSelect.value = activeMicDevice; }
           if (viewingLive()) renderMain();
         }
